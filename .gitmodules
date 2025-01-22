@@ -1,0 +1,3 @@
+[submodule "docs/vectorfield-fisher-writing"]
+	path = docs/vectorfield-fisher-writing
+	url = https://github.com/hyungju-jeon/vectorfield-fisher-writing
