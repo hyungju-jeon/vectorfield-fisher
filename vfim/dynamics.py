@@ -1,7 +1,7 @@
-import jax.numpy as jnp
+import torch
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
-from vfim.data_generation import VectorField
+from vfim.vector_field import VectorField
 
 
 class DynamicsModel:
@@ -17,14 +17,14 @@ class DynamicsModel:
             trajectories = []
             for x in x0:
                 trajectories.append(self.generate_trajectory(x, n_steps, params))
-            return jnp.array(trajectories)
+            return torch.stack(trajectories)
         else:
             state = x0
             trajectory = [state]
             for _ in range(n_steps):
                 state = self.predict_next_state(state, params)
                 trajectory.append(state)
-            return jnp.array(trajectory)
+            return torch.stack(trajectory)
 
 
 class VectorFieldDynamics(DynamicsModel):
@@ -45,12 +45,18 @@ class RNNDynamics(DynamicsModel):
         if params is None:
             params = self.params
         W, U, b = params
-        return jnp.tanh(W @ state + b)  # Simple RNN dynamics
+        return torch.tanh(torch.mm(W, state.unsqueeze(-1)).squeeze() + b)
 
 
 class GPDynamics(DynamicsModel):
     def __init__(self, dt, X_train, Y_train):
         super().__init__(dt)
+        # Convert torch tensors to numpy for sklearn GP
+        if torch.is_tensor(X_train):
+            X_train = X_train.cpu().numpy()
+        if torch.is_tensor(Y_train):
+            Y_train = Y_train.cpu().numpy()
+
         kernel = C(1.0, (0.1, 10.0)) * RBF(
             length_scale=1.0, length_scale_bounds=(0.1, 10.0)
         )
@@ -59,4 +65,10 @@ class GPDynamics(DynamicsModel):
         )
 
     def predict_next_state(self, state, params=None):
-        return self.gp.predict(state.reshape(1, -1)).reshape(-1)
+        # Handle torch tensor input/output
+        if torch.is_tensor(state):
+            device = state.device
+            state_np = state.cpu().numpy()
+            pred = self.gp.predict(state_np.reshape(1, -1)).reshape(-1)
+            return torch.tensor(pred, device=device)
+        return torch.tensor(self.gp.predict(state.reshape(1, -1)).reshape(-1))

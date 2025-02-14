@@ -1,15 +1,12 @@
-# %%
-import random
 from typing import Tuple, Optional, Literal
-import numpy as np
+import numpy as np  # kept only for matplotlib compatibility
 import matplotlib.pyplot as plt
-from scipy.interpolate import griddata
 import torch
 import gpytorch
 from gpytorch.kernels import RBFKernel, ScaleKernel
 
 # Type aliases
-ArrayType = np.ndarray
+ArrayType = torch.Tensor
 ModelType = Literal["multi", "ring", "limitcycle", "single"]
 
 
@@ -58,16 +55,12 @@ class VectorField:
         self.create_grid(self.x_range, self.n_grid)
 
     def create_grid(self, x_range: float, n_grid: int) -> None:
-        """Create a 2D grid for the vector field.
-
-        Args:
-            x_range: Range of coordinates.
-            n_grid: Number of grid points.
-        """
-        x = np.linspace(-x_range, x_range, n_grid)
-        y = np.linspace(-x_range, x_range, n_grid)
-        X, Y = np.meshgrid(x, y)
-        xy = np.stack([X.ravel(), Y.ravel()], axis=1)
+        """Create a 2D grid for the vector field using PyTorch."""
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        x = torch.linspace(-x_range, x_range, n_grid, device=device)
+        y = torch.linspace(-x_range, x_range, n_grid, device=device)
+        X, Y = torch.meshgrid(x, y, indexing="xy")
+        xy = torch.stack([X.flatten(), Y.flatten()], dim=1)
 
         self.X, self.Y, self.xy = X, Y, xy
 
@@ -86,7 +79,7 @@ class VectorField:
         self.U, self.V = generate_random_vector_field(self.model, self.xy, **kwargs)
 
     def interpolate(self, x: ArrayType) -> ArrayType:
-        """Interpolate vector field values at given points.
+        """Interpolate vector field values at given points using PyTorch RBF interpolation.
 
         Args:
             x: Points to interpolate at, shape (n_points, 2).
@@ -100,10 +93,16 @@ class VectorField:
         if any(v is None for v in [self.X, self.Y, self.U, self.V]):
             raise ValueError("Vector field not generated yet.")
 
-        x = x.reshape(1, -1)
-        points = np.stack([self.X.ravel(), self.Y.ravel()], axis=1)
-        values = np.stack([self.U.ravel(), self.V.ravel()], axis=1)
-        return griddata(points, values, x, method="cubic")[0]
+        x = x.reshape(1, 2)
+        points = torch.stack([self.X.flatten(), self.Y.flatten()], dim=1)
+        values = torch.stack([self.U.flatten(), self.V.flatten()], dim=1)
+
+        # RBF interpolation
+        dist = torch.cdist(x, points)
+        weights = torch.exp(-dist / 0.1)  # RBF kernel with length scale 0.1
+        weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
+
+        return torch.mm(weights, values)[0]
 
     def __call__(self, x: ArrayType) -> ArrayType:
         """Callable interface for interpolation.
@@ -132,12 +131,17 @@ class VectorField:
         fig = kwargs.pop("fig", plt.figure(figsize=(10, 10)))
         ax = fig.add_subplot(111)
 
-        # Create streamplot
+        # Convert to numpy for matplotlib
+        X_np = self.X.cpu().numpy()
+        Y_np = self.Y.cpu().numpy()
+        U_np = self.U.cpu().numpy()
+        V_np = self.V.cpu().numpy()
+
         ax.streamplot(
-            self.X,
-            self.Y,
-            self.U,
-            self.V,
+            X_np,
+            Y_np,
+            U_np,
+            V_np,
             density=2,
             linewidth=0.5,
             color="b",
@@ -183,7 +187,7 @@ def generate_random_vector_field(
 def multi_attractor(
     xy: ArrayType, norm: float = 0.05, random_seed: int = 49, length_scale: float = 0.5
 ) -> Tuple[ArrayType, ArrayType]:
-    """Generate a multi-attractor vector field with random perturbations using GPyTorch.
+    """Generate a multi-attractor vector field using PyTorch.
 
     Args:
         xy: Grid points coordinates.
@@ -195,51 +199,39 @@ def multi_attractor(
             - U (ArrayType): X components of the vector field
             - V (ArrayType): Y components of the vector field
     """
-    # Set random seeds
     torch.manual_seed(random_seed)
-    rng = np.random.default_rng(random_seed)
-
-    # Convert to PyTorch tensor
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    xy_torch = torch.tensor(xy, dtype=torch.float32, device=device)
+    device = xy.device
 
     try:
-        # Initialize kernel with more stable parameters
         base_kernel = RBFKernel(ard_num_dims=2)
         base_kernel.lengthscale = length_scale
         kernel = ScaleKernel(base_kernel)
-        kernel.outputscale = 0.5  # Reduced scale for stability
+        kernel.outputscale = 0.5
 
-        # Compute kernel matrix efficiently using GPyTorch
         with torch.no_grad(), gpytorch.settings.fast_computations(True):
             kernel.eval()
-            K = kernel(xy_torch).evaluate()
+            K = kernel(xy).evaluate()
 
-        # Use eigendecomposition directly
         eigenvalues, eigenvectors = torch.linalg.eigh(K)
-        # Ensure eigenvalues are positive and well-conditioned
         eigenvalues = eigenvalues.clamp(min=1e-4)
         eps = torch.randn(2, K.shape[0], device=device)
         samples = torch.matmul(eps * torch.sqrt(eigenvalues), eigenvectors.T)
 
     except Exception as e:
         print(f"Falling back to simple random field due to error: {str(e)}")
-        # Fallback to simple random field
-        grid_size = int(np.sqrt(xy.shape[0]))
+        grid_size = int(torch.sqrt(torch.tensor(xy.shape[0])))
         samples = torch.randn(2, xy.shape[0], device=device)
-        samples = torch.nn.functional.normalize(samples, dim=1) * norm
 
     # Reshape and normalize
-    grid_size = int(np.sqrt(xy.shape[0]))
+    grid_size = int(torch.sqrt(torch.tensor(xy.shape[0])))
     U = samples[0].reshape(grid_size, grid_size)
     V = samples[1].reshape(grid_size, grid_size)
 
-    # Add small epsilon to avoid division by zero
     magnitude = torch.hypot(U, V).clamp(min=1e-8)
     U = norm * U / magnitude
     V = norm * V / magnitude
 
-    return U.cpu().numpy(), V.cpu().numpy()
+    return U, V  # Return torch tensors directly
 
 
 if __name__ == "__main__":
