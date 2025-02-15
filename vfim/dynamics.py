@@ -1,74 +1,166 @@
 import torch
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
-from vfim.vector_field import VectorField
+import torch.nn as nn
+import numpy as np
+from torch.distributions import Normal
+from torch.nn.functional import softplus
 
 
-class DynamicsModel:
-    def __init__(self, dt):
+# Small constant to prevent numerical instability
+eps = 1e-6
+
+
+class DynamicsWrapper:
+    """Wrapper class for dynamics models that handles trajectory generation.
+
+    Args:
+        model: Underlying dynamics model.
+        dt (float): Time step size for trajectory generation.
+    """
+
+    def __init__(self, model, dt):
         self.dt = dt
+        self.model = model
 
-    def predict_next_state(self, state, params):
-        raise NotImplementedError("Subclasses should implement this method.")
+    def __call__(self, *args, **kwds):
+        return self.model(*args, **kwds)
 
-    def generate_trajectory(self, x0, n_steps, params=None):
+    @torch.no_grad()
+    def generate_trajectory(self, x0, n_steps, R):
         # if x0 is a matrix of shape (n_samples, n_dim), generate n_samples trajectories
         if len(x0.shape) > 1:
             trajectories = []
             for x in x0:
-                trajectories.append(self.generate_trajectory(x, n_steps, params))
+                trajectories.append(self.generate_trajectory(x, n_steps, R))
             return torch.stack(trajectories)
         else:
             state = x0
             trajectory = [state]
-            for _ in range(n_steps):
-                state = self.predict_next_state(state, params)
+            for _ in range(n_steps - 1):
+                state = (
+                    state
+                    + (self.model(state) + np.sqrt(R) * torch.randn_like(state))
+                    * self.dt
+                )
                 trajectory.append(state)
             return torch.stack(trajectory)
 
 
-class VectorFieldDynamics(DynamicsModel):
-    def __init__(self, dt, vf: VectorField):
-        super().__init__(dt)
-        self.vf = vf
+class RNNDynamics(nn.Module):
+    """RNN-based dynamics model that predicts state transitions.
 
-    def predict_next_state(self, state, params=None):
-        return self.vf(state) * self.dt + state
+    Args:
+        dx (int): Dimension of the state space.
+        dh (int, optional): Hidden dimension size. Defaults to 256.
+        residual (bool, optional): Whether to use residual connections. Defaults to True.
+        fixed_variance (bool, optional): Whether to use fixed variance. Defaults to True.
+        device (str, optional): Device to run the model on. Defaults to "cpu".
+    """
 
+    def __init__(self, dx, dh=256, residual=True, fixed_variance=True, device="cpu"):
+        super().__init__()
 
-class RNNDynamics(DynamicsModel):
-    def __init__(self, dt, params):
-        super().__init__(dt)
-        self.params = params  # (W, U, b) tuple
+        self.dx = dx
+        self.residual = residual
+        self.fixed_variance = fixed_variance
 
-    def predict_next_state(self, state, params=None):
-        if params is None:
-            params = self.params
-        W, U, b = params
-        return torch.tanh(torch.mm(W, state.unsqueeze(-1)).squeeze() + b)
+        if fixed_variance:
+            self.logvar = nn.Parameter(
+                -2 * torch.randn(1, dx, device=device), requires_grad=True
+            )
+            d_out = dx
+        else:
+            d_out = 2 * dx
 
+        self.prior = nn.Sequential(
+            nn.Linear(dx, dh),
+            nn.Tanh(),
+            nn.Linear(dh, dh),
+            nn.Tanh(),
+            nn.Linear(dh, d_out),
+        ).to(device)
+        self.device = device
 
-class GPDynamics(DynamicsModel):
-    def __init__(self, dt, X_train, Y_train):
-        super().__init__(dt)
-        # Convert torch tensors to numpy for sklearn GP
-        if torch.is_tensor(X_train):
-            X_train = X_train.cpu().numpy()
-        if torch.is_tensor(Y_train):
-            Y_train = Y_train.cpu().numpy()
+    def compute_param(self, x):
+        """Computes mean and variance parameters of state transition distribution.
 
-        kernel = C(1.0, (0.1, 10.0)) * RBF(
-            length_scale=1.0, length_scale_bounds=(0.1, 10.0)
-        )
-        self.gp = GaussianProcessRegressor(kernel=kernel, alpha=1e-2).fit(
-            X_train, Y_train
-        )
+        Args:
+            x (torch.Tensor): Input state tensor of shape (..., dx).
 
-    def predict_next_state(self, state, params=None):
-        # Handle torch tensor input/output
-        if torch.is_tensor(state):
-            device = state.device
-            state_np = state.cpu().numpy()
-            pred = self.gp.predict(state_np.reshape(1, -1)).reshape(-1)
-            return torch.tensor(pred, device=device)
-        return torch.tensor(self.gp.predict(state.reshape(1, -1)).reshape(-1))
+        Returns:
+            tuple:
+                mu (torch.Tensor): Mean of state transition distribution.
+                var (torch.Tensor): Variance of state transition distribution.
+        """
+        out = self.prior(x)
+
+        if self.fixed_variance:
+            mu = out
+            var = softplus(self.logvar) + eps
+        else:
+            mu, logvar = torch.split(out, [self.dx, self.dx], -1)
+            var = softplus(logvar) + eps
+
+        if self.residual:
+            mu = mu + x
+
+        return mu, var
+
+    def sample_forward(self, x, k=1, return_trajectory=False):
+        """Generates samples from forward dynamics model.
+
+        Args:
+            x (torch.Tensor): Initial state tensor of shape (..., dx).
+            k (int, optional): Number of forward steps. Defaults to 1.
+            return_trajectory (bool, optional): If True, returns full trajectory. Defaults to False.
+
+        Returns:
+            If return_trajectory is False:
+                tuple:
+                    x_sample (torch.Tensor): Final sampled state.
+                    mu (torch.Tensor): Final predicted mean.
+                    var (torch.Tensor): Prediction variance.
+            If return_trajectory is True:
+                tuple:
+                    trajectory (torch.Tensor): Full trajectory of sampled states.
+                    means (torch.Tensor): Full trajectory of predicted means.
+                    var (torch.Tensor): Prediction variance.
+        """
+        var = softplus(self.logvar) + eps
+        x_samples, mus = [x], []
+        for i in range(k):
+            mus.append(self.compute_param(x_samples[i])[0])
+            x_samples.append(
+                mus[i] + torch.sqrt(var) * torch.randn_like(mus[i], device=x.device)
+            )
+
+        if return_trajectory:
+            return torch.cat(x_samples, dim=-2)[..., 1:, :], torch.cat(mus, dim=-2), var
+        else:
+            return x_samples[-1], mus[-1], var
+
+    def _compute_log_prob(self, mu, var, x):
+        """Computes log probability of observing state x given predicted distribution.
+
+        Args:
+            mu (torch.Tensor): Mean of predicted distribution.
+            var (torch.Tensor): Variance of predicted distribution.
+            x (torch.Tensor): Observed state.
+
+        Returns:
+            torch.Tensor: Log probability of observing x.
+        """
+        log_prob = torch.sum(Normal(mu, torch.sqrt(var)).log_prob(x), (-2, -1))
+        return log_prob
+
+    def forward(self, x_prev):
+        """
+        Predicts next state mean given current state.
+
+        Args:
+            x_prev (torch.Tensor): Current state tensor
+
+        Returns:
+            torch.Tensor: Predicted mean of next state
+        """
+        mu, _ = self.compute_param(x_prev)
+        return mu

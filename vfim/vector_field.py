@@ -78,6 +78,7 @@ class VectorField:
 
         self.U, self.V = generate_random_vector_field(self.model, self.xy, **kwargs)
 
+    @torch.no_grad()
     def interpolate(self, x: ArrayType) -> ArrayType:
         """Interpolate vector field values at given points using PyTorch RBF interpolation.
 
@@ -115,6 +116,7 @@ class VectorField:
         """
         return self.interpolate(x)
 
+    @torch.no_grad()
     def streamplot(self, **kwargs) -> None:
         """Create a streamplot visualization of the vector field.
 
@@ -185,7 +187,11 @@ def generate_random_vector_field(
 
 
 def multi_attractor(
-    xy: ArrayType, norm: float = 0.05, random_seed: int = 49, length_scale: float = 0.5
+    xy: ArrayType,
+    norm: float = 0.05,
+    random_seed: int = 49,
+    length_scale: float = 0.5,
+    **kwargs,
 ) -> Tuple[ArrayType, ArrayType]:
     """Generate a multi-attractor vector field using PyTorch.
 
@@ -199,6 +205,7 @@ def multi_attractor(
             - U (ArrayType): X components of the vector field
             - V (ArrayType): Y components of the vector field
     """
+    w_attractor = kwargs.get("w_attractor", 0)
     torch.manual_seed(random_seed)
     device = xy.device
 
@@ -230,6 +237,12 @@ def multi_attractor(
     magnitude = torch.hypot(U, V).clamp(min=1e-8)
     U = norm * U / magnitude
     V = norm * V / magnitude
+
+    if w_attractor > 0:
+        U_attract = -xy[:, 0] * torch.sqrt(torch.sum(xy**2, 1)) * w_attractor
+        V_attract = -xy[:, 1] * torch.sqrt(torch.sum(xy**2, 1)) * w_attractor
+        U += U_attract.reshape(grid_size, grid_size)
+        V += V_attract.reshape(grid_size, grid_size)
 
     return U, V  # Return torch tensors directly
 
