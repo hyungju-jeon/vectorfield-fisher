@@ -4,6 +4,7 @@ import torch.nn as nn
 import numpy as np
 from torch.distributions import Normal
 from torch.nn.functional import softplus
+from vfim.visualize import plot_vector_field
 
 
 # Small constant to prevent numerical instability
@@ -15,11 +16,9 @@ class DynamicsWrapper:
 
     Args:
         model: Underlying dynamics model.
-        dt (float): Time step size for trajectory generation.
     """
 
-    def __init__(self, model, dt):
-        self.dt = dt
+    def __init__(self, model):
         self.model = model
 
     def __call__(self, *args, **kwds):
@@ -27,11 +26,13 @@ class DynamicsWrapper:
 
     @torch.no_grad()
     def generate_trajectory(self, x0, n_steps, R):
-        return self.model.sample_forward(x0, n_steps, return_trajectory=True)[0]
+        return self.model.sample_forward(x0, k=n_steps, var=R, return_trajectory=True)[
+            0
+        ]
 
     @torch.no_grad()
     def streamplot(self, **kwargs):
-        return self.model.streamplot(**kwargs)
+        return plot_vector_field(self.model, **kwargs)
 
 
 class RNNDynamics(nn.Module):
@@ -68,6 +69,15 @@ class RNNDynamics(nn.Module):
         ).to(device)
         self.device = device
 
+    @torch.no_grad()
+    def compute_var(self):
+        """Computes the variance of the state transition distribution.
+
+        Returns:
+            torch.Tensor: Variance of the state transition distribution.
+        """
+        return softplus(self.logvar) + eps
+
     def compute_param(self, x):
         """Computes mean and variance parameters of state transition distribution.
 
@@ -90,7 +100,7 @@ class RNNDynamics(nn.Module):
 
         return mu, var
 
-    def sample_forward(self, x, k=1, return_trajectory=False):
+    def sample_forward(self, x, k=1, var=None, return_trajectory=False):
         """Generates samples from forward dynamics model.
 
         Args:
@@ -111,6 +121,7 @@ class RNNDynamics(nn.Module):
                     var (torch.Tensor): Prediction variance.
         """
         var = softplus(self.logvar) + eps
+
         x_samples, mus = [x], []
         for i in range(k):
             mus.append(self(x_samples[i]) + x_samples[i])

@@ -1,48 +1,59 @@
 import numpy as np
+import scipy as sp
 import torch
 import matplotlib.pyplot as plt
 
 
-def compute_vector_field(dynamics, xmin, xmax, ymin, ymax, device="cpu"):
+@torch.no_grad()
+def compute_vector_field(dynamics, x_range=2.5, n_grid=50, device="cpu"):
     """
     Produces a vector field for a given dynamical system
     :param queries: N by dx torch tensor of query points where each row is a query
     :param dynamics: function handle for dynamics
     """
-    xt, yt = np.meshgrid(np.linspace(xmin, xmax, 100), np.linspace(ymin, ymax, 100))
-    queries = np.stack([xt.ravel(), yt.ravel()]).T
+
+    x = torch.linspace(-x_range, x_range, n_grid, device=device)
+    y = torch.linspace(-x_range, x_range, n_grid, device=device)
+    X, Y = torch.meshgrid(x, y, indexing="xy")
+    xy = torch.stack([X.flatten(), Y.flatten()], dim=1)
     if hasattr(dynamics, "device"):
-        queries = torch.from_numpy(queries).float().to(dynamics.device)
+        xy = xy.to(dynamics.device)
     else:
-        queries = torch.from_numpy(queries).float().to(device)
+        xy = xy.to(device)
 
-    vel = torch.zeros(queries.shape, device=device)
+    vel = torch.zeros(xy.shape, device=device)
     with torch.no_grad():
-        for n in range(queries.shape[0]):
-            vel[n, :] = (dynamics(queries[[n]]) - queries[[n]]).to("cpu")
+        for n in range(xy.shape[0]):
+            vel[n, :] = (dynamics(xy[[n]])).to("cpu")
 
-    vel_x = vel[:, 0].reshape(xt.shape[0], xt.shape[1])
-    vel_y = vel[:, 1].reshape(yt.shape[0], yt.shape[1])
-    speed = torch.sqrt(vel_x**2 + vel_y**2)
-    return xt, yt, vel_x, vel_y, speed
+    U = vel[:, 0].reshape(X.shape[0], X.shape[1])
+    V = vel[:, 1].reshape(Y.shape[0], Y.shape[1])
+    return X, Y, U, V
 
 
-def plot_vector_field(vae, device):
-    xt, yt, vel_x, vel_y, speed = compute_vector_field(
-        vae.dynamics,
-        xmin=-20,
-        xmax=5,
-        ymin=-20,
-        ymax=10,
-        device=device,
-    )
+def plot_vector_field(dynamics, **kwargs):
+    if hasattr(dynamics, "X"):
+        X, Y, U, V = dynamics.X, dynamics.Y, dynamics.U, dynamics.V
+    else:
+        X, Y, U, V = compute_vector_field(dynamics, **kwargs)
+    X, Y, U, V = X.cpu().numpy(), Y.cpu().numpy(), U.cpu().numpy(), V.cpu().numpy()
+    speed = np.sqrt(U**2 + V**2)
 
     plt.figure(figsize=(10, 8))
+    ax = plt.gca()
     plt.streamplot(
-        xt, yt, vel_x, vel_y, color=speed.numpy(), linewidth=1, cmap="viridis"
+        X,
+        Y,
+        U,
+        V,
+        color=speed,
+        linewidth=0.5,
+        density=2,
+        cmap="viridis",
     )
-    plt.colorbar(label="Speed")
+    plt.colorbar(label="Speed", aspect=20)
     plt.xlabel("Latent Dimension 1")
     plt.ylabel("Latent Dimension 2")
     plt.title("Vector Field of Latent Dynamics")
-    plt.show()
+    plt.axis("off")
+    plt.axis("equal")

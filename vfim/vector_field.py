@@ -118,66 +118,17 @@ class VectorField:
         """
         return self.interpolate(x)
 
-    def sample_forward(self, x0, n_steps, R):
-        # if x0 is a matrix of shape (n_samples, n_dim), generate n_samples trajectories
-        if len(x0.shape) > 1:
-            trajectories = []
-            for x in x0:
-                trajectories.append(self.generate_trajectory(x, n_steps, R))
-            return torch.stack(trajectories)
+    def sample_forward(self, x, k, var, return_trajectory=True):
+        x_samples, mus = [x], [x]
+        for i in range(k):
+            mus.append(self(mus[i]) + mus[i])
+            x_samples.append(
+                mus[i] + torch.sqrt(var) * torch.randn_like(mus[i], device=x.device)
+            )
+        if return_trajectory:
+            return torch.cat(x_samples, dim=-2)[..., 1:, :], torch.cat(mus, dim=-2)
         else:
-            state = x0
-            trajectory = [state]
-            for _ in range(n_steps - 1):
-                state = (
-                    state
-                    + (self.model(state) + np.sqrt(R) * torch.randn_like(state))
-                    * self.dt
-                )
-                trajectory.append(state)
-            return torch.stack(trajectory)
-
-    @torch.no_grad()
-    def streamplot(self, **kwargs) -> None:
-        """Create a streamplot visualization of the vector field.
-
-        Args:
-            **kwargs: Additional arguments passed to plt.streamplot.
-                fig: Optional matplotlib figure instance.
-
-        Raises:
-            ValueError: If vector field is not generated yet.
-        """
-        if any(v is None for v in [self.X, self.Y, self.U, self.V]):
-            raise ValueError("Vector field not generated yet.")
-
-        fig = kwargs.pop("fig", plt.figure(figsize=(10, 10)))
-        ax = fig.add_subplot(111)
-
-        # Convert to numpy for matplotlib
-        X_np = self.X.cpu().numpy()
-        Y_np = self.Y.cpu().numpy()
-        U_np = self.U.cpu().numpy()
-        V_np = self.V.cpu().numpy()
-
-        ax.streamplot(
-            X_np,
-            Y_np,
-            U_np,
-            V_np,
-            density=2,
-            linewidth=0.5,
-            color="b",
-            **kwargs,
-        )
-
-        # Configure plot
-        ax.set_title("Streamline Plot of Vector Field")
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        ax.axis("off")
-        ax.axis("equal")
-        # plt.show()
+            return x_samples[-1], mus[-1]
 
 
 def generate_random_vector_field(
@@ -209,7 +160,7 @@ def generate_random_vector_field(
 
 def multi_attractor(
     xy: ArrayType,
-    norm: float = 0.05,
+    norm: float = 0.1,
     random_seed: int = 49,
     length_scale: float = 0.5,
     **kwargs,
