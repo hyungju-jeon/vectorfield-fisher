@@ -18,11 +18,11 @@ class SeqVae(nn.Module):
         device (str, optional): The device to run the model on. Defaults to "cpu".
     """
 
-    def __init__(self, dynamics, state_encoder, decoder, device="cpu"):
+    def __init__(self, dynamics, encoder, decoder, device="cpu"):
         super().__init__()
 
         self.dynamics = dynamics
-        self.state_encoder = state_encoder
+        self.encoder = encoder
         self.decoder = decoder
 
         self.device = device
@@ -78,7 +78,7 @@ class SeqVae(nn.Module):
         """
 
         # samples from variational posterior
-        x_samples, mu_q_x, var_q_x, log_q = self.state_encoder(y, n_samples=n_samples)
+        x_samples, mu_q_x, var_q_x, log_q = self.encoder(y, n_samples=n_samples)
 
         kl_d_x = self._compute_kld_x(mu_q_x, var_q_x, x_samples)
 

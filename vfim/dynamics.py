@@ -1,3 +1,4 @@
+from networkx import selfloop_edges
 import torch
 import torch.nn as nn
 import numpy as np
@@ -26,23 +27,11 @@ class DynamicsWrapper:
 
     @torch.no_grad()
     def generate_trajectory(self, x0, n_steps, R):
-        # if x0 is a matrix of shape (n_samples, n_dim), generate n_samples trajectories
-        if len(x0.shape) > 1:
-            trajectories = []
-            for x in x0:
-                trajectories.append(self.generate_trajectory(x, n_steps, R))
-            return torch.stack(trajectories)
-        else:
-            state = x0
-            trajectory = [state]
-            for _ in range(n_steps - 1):
-                state = (
-                    state
-                    + (self.model(state) + np.sqrt(R) * torch.randn_like(state))
-                    * self.dt
-                )
-                trajectory.append(state)
-            return torch.stack(trajectory)
+        return self.model.sample_forward(x0, n_steps, return_trajectory=True)[0]
+
+    @torch.no_grad()
+    def streamplot(self, **kwargs):
+        return self.model.streamplot(**kwargs)
 
 
 class RNNDynamics(nn.Module):
@@ -56,11 +45,10 @@ class RNNDynamics(nn.Module):
         device (str, optional): Device to run the model on. Defaults to "cpu".
     """
 
-    def __init__(self, dx, dh=256, residual=True, fixed_variance=True, device="cpu"):
+    def __init__(self, dx, dh=256, fixed_variance=True, device="cpu"):
         super().__init__()
 
         self.dx = dx
-        self.residual = residual
         self.fixed_variance = fixed_variance
 
         if fixed_variance:
@@ -100,9 +88,6 @@ class RNNDynamics(nn.Module):
             mu, logvar = torch.split(out, [self.dx, self.dx], -1)
             var = softplus(logvar) + eps
 
-        if self.residual:
-            mu = mu + x
-
         return mu, var
 
     def sample_forward(self, x, k=1, return_trajectory=False):
@@ -128,7 +113,7 @@ class RNNDynamics(nn.Module):
         var = softplus(self.logvar) + eps
         x_samples, mus = [x], []
         for i in range(k):
-            mus.append(self.compute_param(x_samples[i])[0])
+            mus.append(self(x_samples[i]) + x_samples[i])
             x_samples.append(
                 mus[i] + torch.sqrt(var) * torch.randn_like(mus[i], device=x.device)
             )

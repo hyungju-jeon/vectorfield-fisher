@@ -2,22 +2,26 @@
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
+from tqdm import tqdm
+from torch.utils.data import DataLoader
 from vfim.dynamics import DynamicsWrapper, RNNDynamics
 from vfim.vector_field import VectorField
 from vfim.encoder import Encoder
 from vfim.decoder import NormalDecoder
 from vfim.models import SeqVae
-from torch.utils.data import DataLoader
-from tqdm import tqdm
+
+# from vfim.visualize import plot_vector_field
+
 
 if __name__ == "__main__":
     # Step 0: Set up random seed and key
     torch_seed = 1
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.set_default_device(device)
 
     # Step 1: Define true dynamics and observation model
     vf = VectorField(x_range=2.5, n_grid=50)
     vf.generate_vector_field(random_seed=torch_seed, w_attractor=0.01)
-    # vf.streamplot()
 
     # Observation model parameters: y = exp(C z + b) + noise.
     n_neurons = 50
@@ -28,22 +32,22 @@ if __name__ == "__main__":
     f_true = DynamicsWrapper(dt=dt, model=vf)
 
     # Step 2: Generate training trajectory (K x T x 2) and observation (K x T x D)
-    K = 500
+    K = 1000
     T = 200
     R, Q = 0.005, 0.005
-    x0 = torch.rand(K, 2) - 0.5
+    x0 = torch.rand(K, 2) * 5 - 2.5
     x_train = f_true.generate_trajectory(x0, T, R)
     y_train = (x_train @ C.T) + torch.randn(K, T, n_neurons) * np.sqrt(Q)
 
-    vf.streamplot()
-    plt.plot(x_train[0][:, 0], x_train[0][:, 1])
-    plt.show()
+    # vf.streamplot()
+    # for i in range(K):
+    #     plt.plot(x_train[i][:, 0], x_train[i][:, 1])
+    # plt.show()
 
     # Step 3: Initialize the inference model and train
     d_obs = 50
     d_latent = 2
     d_hidden = 16
-    device = "cpu"
 
     encoder = Encoder(d_obs, d_latent, d_hidden, device=device)
     rnn_dynamics = RNNDynamics(d_latent, device=device)
@@ -57,6 +61,8 @@ if __name__ == "__main__":
     weight_decay = 1e-4
 
     dataloader = DataLoader(y_train, batch_size=batch_size)
+    # Set random seed for reproducibility
+    torch.manual_seed(torch_seed)
 
     param_list = list(vae.parameters())
     opt = torch.optim.AdamW(params=param_list, lr=lr, weight_decay=weight_decay)
@@ -70,6 +76,7 @@ if __name__ == "__main__":
             with torch.no_grad():
                 training_losses.append(loss.item())
 
+    # Plot the vector field of the latent dynamics
     # Step 4: Compute FIM and CRLB from two initial points
 
     # Step 5: Update the inference model and evaluate the model accuracy

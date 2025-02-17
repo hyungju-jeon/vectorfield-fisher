@@ -83,7 +83,7 @@ class VectorField:
         """Interpolate vector field values at given points using PyTorch RBF interpolation.
 
         Args:
-            x: Points to interpolate at, shape (n_points, 2).
+            x: Points to interpolate at, shape (trials, times, dimension).
 
         Returns:
             Array containing interpolated vector field values.
@@ -94,7 +94,8 @@ class VectorField:
         if any(v is None for v in [self.X, self.Y, self.U, self.V]):
             raise ValueError("Vector field not generated yet.")
 
-        x = x.reshape(1, 2)
+        trials, times, _ = x.shape
+        x = x.reshape(trials * times, 2)
         points = torch.stack([self.X.flatten(), self.Y.flatten()], dim=1)
         values = torch.stack([self.U.flatten(), self.V.flatten()], dim=1)
 
@@ -103,7 +104,8 @@ class VectorField:
         weights = torch.exp(-dist / 0.1)  # RBF kernel with length scale 0.1
         weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
 
-        return torch.mm(weights, values)[0]
+        interpolated_values = torch.mm(weights, values)
+        return interpolated_values.reshape(trials, times, 2)
 
     def __call__(self, x: ArrayType) -> ArrayType:
         """Callable interface for interpolation.
@@ -115,6 +117,25 @@ class VectorField:
             Array containing interpolated vector field values.
         """
         return self.interpolate(x)
+
+    def sample_forward(self, x0, n_steps, R):
+        # if x0 is a matrix of shape (n_samples, n_dim), generate n_samples trajectories
+        if len(x0.shape) > 1:
+            trajectories = []
+            for x in x0:
+                trajectories.append(self.generate_trajectory(x, n_steps, R))
+            return torch.stack(trajectories)
+        else:
+            state = x0
+            trajectory = [state]
+            for _ in range(n_steps - 1):
+                state = (
+                    state
+                    + (self.model(state) + np.sqrt(R) * torch.randn_like(state))
+                    * self.dt
+                )
+                trajectory.append(state)
+            return torch.stack(trajectory)
 
     @torch.no_grad()
     def streamplot(self, **kwargs) -> None:
