@@ -20,7 +20,7 @@ class NormalDecoder(nn.Module):
         logvar (nn.Parameter): Learnable parameter for log variance.
     """
 
-    def __init__(self, dx, dy, device="cpu", l2=0.0):
+    def __init__(self, dx, dy, device="cpu", l2=0.0, C=None):
         """
         Initializes the NormalDecoder with input and output dimensions and the device to run on.
         Args:
@@ -30,8 +30,14 @@ class NormalDecoder(nn.Module):
         """
         super().__init__()
         self.device = device
-        # Remove bias from linear layer
-        self.decoder = nn.Linear(dx, dy, bias=False).to(device)
+        if C is not None:
+            self.decoder = (
+                nn.Linear(dx, dy, bias=False).to(device).requires_grad_(False)
+            )
+            self.decoder.weight.data = C
+        else:
+            # Remove bias from linear layer
+            self.decoder = nn.Linear(dx, dy, bias=False).to(device)
         self.logvar = nn.Parameter(
             0.01 * torch.randn(1, dy, device=device), requires_grad=True
         )
