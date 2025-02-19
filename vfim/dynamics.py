@@ -1,4 +1,3 @@
-from networkx import selfloop_edges
 import torch
 import torch.nn as nn
 import numpy as np
@@ -160,3 +159,58 @@ class RNNDynamics(nn.Module):
         """
         mu, _ = self.compute_param(x_prev)
         return mu
+
+
+class EnsembleRNN(nn.Module):
+    """Ensemble of RNN-based dynamics models.
+
+    Args:
+        dx (int): Dimension of the state space
+        n_models (int): Number of ensemble members
+        dh (int, optional): Hidden dimension size. Defaults to 256
+        device (str, optional): Device to run model on. Defaults to "cpu"
+    """
+
+    def __init__(self, dx, n_models=5, dh=256, device="cpu"):
+        super().__init__()
+        self.models = nn.ModuleList(
+            [RNNDynamics(dx, dh=dh, device=device) for _ in range(n_models)]
+        )
+        self.n_models = n_models
+        self.device = device
+
+    def sample_forward(self, x, k=1, var=None, return_trajectory=False):
+        """Generates samples using ensemble predictions.
+
+        Each model in ensemble generates predictions independently.
+        Final prediction is averaged across ensemble members.
+        Variance includes both model uncertainty and prediction uncertainty.
+        """
+        all_samples = []
+        all_means = []
+        all_vars = []
+
+        for model in self.models:
+            samples, means, vars = model.sample_forward(x, k, var, return_trajectory)
+            all_samples.append(samples)
+            all_means.append(means)
+            all_vars.append(vars)
+
+        # Stack predictions from ensemble members
+        samples = torch.stack(all_samples)  # (M, ..., T, D)
+        means = torch.stack(all_means)  # (M, ..., T, D)
+        vars = torch.stack(all_vars)  # (M, ..., D) or (M, D)
+
+        # Combine predictions
+        mean_prediction = means.mean(dim=0)
+        # Total variance includes both model uncertainty and prediction uncertainty
+        total_variance = vars.mean(dim=0) + means.var(dim=0)
+
+        return samples.mean(dim=0), mean_prediction, total_variance
+
+    def forward(self, x):
+        """Forward pass averages predictions from all ensemble members."""
+        predictions = []
+        for model in self.models:
+            predictions.append(model(x))
+        return torch.stack(predictions).mean(dim=0)
