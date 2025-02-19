@@ -40,7 +40,6 @@ def plot_vector_field(dynamics, **kwargs):
     speed = np.sqrt(U**2 + V**2)
 
     plt.figure(figsize=(10, 8))
-    ax = plt.gca()
     plt.streamplot(
         X,
         Y,
