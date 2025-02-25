@@ -25,20 +25,18 @@ class FisherMetrics:
     def __init__(
         self,
         dynamics,
-        observation_matrix,
-        observation_bias,
+        decoder,
         process_noise,
         measurement_noise,
     ):
         self.dynamics = dynamics
-        self.C = observation_matrix
-        self.b = observation_bias
+        self.decoder = decoder
         self.Q = process_noise
         self.R = measurement_noise
         self.device = next(dynamics.parameters()).device
 
-    def compute_jacobian_state(self, state):
-        """Compute Jacobian of dynamics with respect to state.
+    def compute_jacobian_state(self, function, state):
+        """Compute Jacobian of a function with respect to state.
 
         Args:
             state (torch.Tensor): Current state vector of shape (n_state,)
@@ -47,11 +45,11 @@ class FisherMetrics:
             torch.Tensor: Jacobian matrix of shape (n_state, n_state)
         """
         state = state.clone().detach().requires_grad_(True)
-        J_f = torch.autograd.functional.jacobian(lambda z: self.dynamics(z), state)
+        J_f = torch.autograd.functional.jacobian(lambda z: function(z), state)
         return J_f
 
-    def compute_jacobian_params(self, state):
-        """Compute Jacobian of dynamics with respect to parameters.
+    def compute_jacobian_params(self, function, state):
+        """Compute Jacobian of a function with respect to parameters.
 
         Args:
             state (torch.Tensor): Current state vector of shape (n_state,)
@@ -59,10 +57,9 @@ class FisherMetrics:
         Returns:
             torch.Tensor: Jacobian matrix of shape (n_state, n_params)
         """
-        f_val = self.dynamics(state)
+        f_val = function(state)
         out_dim = f_val.shape[0]
-        params = list(self.dynamics.parameters())
-        num_params = sum(p.numel() for p in params)
+        params = list(function.parameters())
 
         J_theta = []
         for i in range(out_dim):
@@ -78,23 +75,19 @@ class FisherMetrics:
 
         return torch.cat(J_theta, dim=0)
 
-    def compute_observation_quantities(self, state, state_cov):
-        """Compute observation model quantities.
+    def compute_sigma(self, state, state_cov):
+        """Compute innovation covariance matrix.
 
         Args:
             state (torch.Tensor): Current state vector of shape (n_state,)
             state_cov (torch.Tensor): State covariance matrix of shape (n_state, n_state)
 
         Returns:
-            tuple:
-                h (torch.Tensor): Observation mean of shape (n_obs,)
-                H (torch.Tensor): Observation Jacobian of shape (n_obs, n_state)
-                Sigma (torch.Tensor): Innovation covariance of shape (n_obs, n_obs)
+            torch.Tensor: Innovation covariance matrix of shape (n_obs, n_obs)
         """
-        h = torch.exp(self.C @ state + self.b)
-        H = torch.diag(h) @ self.C
+        H = self.compute_jacobian_state(self.decoder, state)
         Sigma = H @ state_cov @ H.T + self.R
-        return h, H, Sigma
+        return Sigma
 
     def compute_sigma_derivative(self, state, state_cov):
         """Compute derivative of innovation covariance with respect to state.
@@ -108,16 +101,21 @@ class FisherMetrics:
         """
 
         def sigma_fn(z):
-            _, _, sigma = self.compute_observation_quantities(z, state_cov)
+            sigma = self.compute_sigma(z, state_cov)
             return sigma
 
-        return torch.autograd.functional.jacobian(sigma_fn, state)
+        return torch.autograd.functional.jacobian(
+            lambda z: self.compute_sigma(z, state_cov), state
+        )
+        # return torch.autograd.functional.jacobian(sigma_fn, state)
 
-    def compute_fim(self, initial_state, trajectory_length, initial_cov):
+    def compute_fim(
+        self, initial_state, trajectory_length, initial_cov, compute_diag=False
+    ):
         """Compute recursive Fisher Information Matrix.
 
         Recursively computes FIM using the formula:
-        [I(theta)]_{ij} ≈ ∑_{t=1}^{T} { (∂h/∂θ)_i^T Σ_t^{-1} (∂h/∂θ)_j
+        [I(theta)]_{ij} ≈ ∑_{t=1}^{T} { (∂e/∂θ)_i^T Σ_t^{-1} (∂e/∂θ)_j
              - 1/2 * trace(Σ_t^{-1} (∂Σ_t/∂θ)_i Σ_t^{-1} (∂Σ_t/∂θ)_j) }
 
         Args:
@@ -128,52 +126,57 @@ class FisherMetrics:
         Returns:
             torch.Tensor: Fisher Information Matrix of shape (n_params, n_params)
         """
-        d = initial_state.shape[0]
+        d_latent = initial_state.shape[0]
         params = list(self.dynamics.parameters())
         num_params = sum(p.numel() for p in params)
 
         fim = torch.zeros(num_params, num_params, device=self.device)
-        state = initial_state
-        state_cov = initial_cov
-        sensitivity = torch.zeros(d, num_params, device=self.device)
-        identity = torch.eye(d, device=self.device)
+        z = initial_state
+        P = initial_cov
+        dz_dtheta = torch.zeros(d_latent, num_params, device=self.device)
+        I = torch.eye(d_latent, device=self.device)
 
         for _ in range(trajectory_length):
             # Prediction step
-            state_jac = self.compute_jacobian_state(state)
-            param_jac = self.compute_jacobian_params(state)
+            df_dz = self.compute_jacobian_state(self.dynamics, z)
+            # B = df_dtheta
+            B = self.compute_jacobian_params(self.dynamics, z)
 
             # Update state and covariance
-            state = state + self.dynamics(state)
-            A = identity + state_jac
-            state_cov = A @ state_cov @ A.T + self.Q
+            z = z + self.dynamics(z)
+            A = I + df_dz
+            P = A @ P @ A.T + self.Q
 
-            # Update sensitivity
-            sensitivity = sensitivity + state_jac @ sensitivity + param_jac
+            # Predictive Step
+            dz_dtheta = A @ dz_dtheta + B
 
-            # Observation step
-            h, H, sigma = self.compute_observation_quantities(state, state_cov)
-            dh_dtheta = H @ sensitivity
+            # Measurement step
+            H = self.compute_jacobian_state(self.decoder, z)
+            sigma = H @ P @ H.T + self.R
+            de_dtheta = -H @ dz_dtheta
+
+            mask_idx = 66250
 
             # Compute Sigma derivatives
-            dsigma_dz = self.compute_sigma_derivative(state, state_cov)
+            dsigma_dz = self.compute_sigma_derivative(z, P)
             dsigma_dtheta = torch.stack(
                 [
-                    sum(dsigma_dz[j] * sensitivity[j, i] for j in range(d))
+                    sum(dsigma_dz[..., j] * dz_dtheta[j, i] for j in range(d_latent))
                     for i in range(num_params)
                 ]
             )
 
             # Update FIM
             sigma_inv = torch.inverse(sigma)
-            mean_term = dh_dtheta.T @ sigma_inv @ dh_dtheta
+            mean_term = de_dtheta.T @ sigma_inv @ de_dtheta
 
             cov_term = torch.zeros_like(fim)
-            for i in range(num_params):
-                for j in range(num_params):
+            for i in range(66500, num_params):
+                for j in range(66500, num_params):
                     trace_term = torch.trace(
                         sigma_inv @ dsigma_dtheta[i] @ sigma_inv @ dsigma_dtheta[j]
                     )
+                    print(trace_term)
                     cov_term[i, j] = -0.5 * trace_term
 
             fim += mean_term + cov_term

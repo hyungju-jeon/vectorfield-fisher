@@ -75,7 +75,7 @@ class NormalDecoder(nn.Module):
             2
         )  # Penalty for deviating from unit norm
 
-    def forward(self, samples, x):
+    def compute_log_prob(self, samples, x):
         """Computes log probability of input data.
 
         Args:
@@ -98,6 +98,10 @@ class NormalDecoder(nn.Module):
             log_prob = log_prob - self.get_regularization()
 
         return log_prob
+
+    def forward(self, samples):
+        mu, _ = self.compute_param(samples)
+        return mu
 
 
 class PoissonDecoder(nn.Module):

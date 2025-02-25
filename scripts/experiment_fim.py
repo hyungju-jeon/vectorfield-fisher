@@ -2,7 +2,7 @@
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
-from tqdm import tqdm
+import copy
 from torch.utils.data import DataLoader
 from vfim.dynamics import DynamicsWrapper, RNNDynamics
 from vfim.vector_field import VectorField
@@ -62,7 +62,7 @@ if __name__ == "__main__":
     f_star = DynamicsWrapper(model=rnn_dynamics)
 
     # %% Step 4: Initialize VAE for f_hat with fewer training data
-    K = 50
+    K = 10
     x0 = torch.rand(K, 2) * 5 - 2.5
     x0 = x0.unsqueeze(1)
     x_train = f_true.generate_trajectory(x0, T, R)
@@ -73,7 +73,7 @@ if __name__ == "__main__":
     vae = SeqVae(rnn_dynamics_hat, encoder_hat, decoder, device=device)
 
     dataloader = DataLoader(y_train, batch_size=batch_size)
-    vae_star.train_model(dataloader, lr, weight_decay, n_epochs)
+    vae.train_model(dataloader, lr, weight_decay, n_epochs)
     f_hat = DynamicsWrapper(model=rnn_dynamics_hat)
 
     # Step 5: Compute FIM and CRLB from two initial points

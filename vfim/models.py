@@ -76,7 +76,7 @@ class SeqVae(nn.Module):
         """
         x_samples, mu_q_x, var_q_x, log_q = self.encoder(y, n_samples=n_samples)
         kl_d_x = self._compute_kld_x(mu_q_x, var_q_x, x_samples)
-        log_like = self.decoder(x_samples, y)
+        log_like = self.decoder.compute_log_prob(x_samples, y)
         elbo = torch.mean(log_like - beta * kl_d_x)
         return -elbo
 
@@ -145,7 +145,7 @@ class EnsembleSeqVae(nn.Module):
                 mu_q_x[..., 1:, :], var_q_x[..., 1:, :], mu_p_x, var_p_x
             )
 
-            log_like = self.decoder(x_samples, y)
+            log_like = self.decoder.compute_log_prob(x_samples, y)
             elbo = torch.mean(log_like - beta * kl_d)
             elbos.append(-elbo)
 
