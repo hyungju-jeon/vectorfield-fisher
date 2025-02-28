@@ -1,7 +1,6 @@
 # %%
 import torch
 import matplotlib.pyplot as plt
-import numpy as np
 import copy
 from torch.utils.data import DataLoader
 from vfim.dynamics import DynamicsWrapper, RNNDynamics
@@ -9,12 +8,13 @@ from vfim.vector_field import VectorField
 from vfim.encoder import Encoder
 from vfim.decoder import NormalDecoder
 from vfim.models import SeqVae, EnsembleSeqVae
+from vfim.information import FisherMetrics
 from vfim.visualize import plot_vector_field
 
 
 if __name__ == "__main__":
     # %% Step 0: Set up random seed and key
-    torch_seed = 1
+    torch_seed = 1234
     torch.manual_seed(torch_seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.set_default_device(device)
@@ -62,7 +62,7 @@ if __name__ == "__main__":
     f_star = DynamicsWrapper(model=rnn_dynamics)
 
     # %% Step 4: Initialize VAE for f_hat with fewer training data
-    K = 10
+    K = 20
     x0 = torch.rand(K, 2) * 5 - 2.5
     x0 = x0.unsqueeze(1)
     x_train = f_true.generate_trajectory(x0, T, R)
@@ -76,11 +76,70 @@ if __name__ == "__main__":
     vae.train_model(dataloader, lr, weight_decay, n_epochs)
     f_hat = DynamicsWrapper(model=rnn_dynamics_hat)
 
-    # Step 5: Compute FIM and CRLB from two initial points
+    # %% Step 5: Compute FIM and CRLB from two initial points
+    num_test = 5
+    T_test = 20
+    fisher = FisherMetrics(
+        dynamics=rnn_dynamics_hat, decoder=decoder, process_noise=R, measurement_noise=Q
+    )
+    initial_states = torch.rand(num_test, d_latent) * 5 - 2.5
+    initial_cov = torch.eye(d_latent, device=device)
 
+    fims = []
+    for i in range(num_test):
+        fim = fisher.compute_fim(
+            initial_states[i].unsqueeze(0), T_test, initial_cov, use_diag=True
+        )
+        fims.append(fim)
+
+    # %% Step 6: Monte Carlo simulation to estimate CRLB
+    n_mc = 100
+    error_state = []
+    x_mc = f_star.generate_trajectory(initial_states.unsqueeze(1), T_test, R)
+    vae_mcs = []
+
+    # Create a single reusable network instance
+    rnn_mc = RNNDynamics(d_latent, device=device)
+    vae_mc = SeqVae(rnn_mc, encoder_hat, decoder, device=device)
+    for i in range(num_test):
+        errors = []
+        for _ in range(n_mc):
+            # Simply load parameters from rnn_dynamics_hat
+            rnn_mc.load_state_dict(rnn_dynamics_hat.state_dict())
+
+            y_mc = (x_mc[i] @ C.T) + torch.randn(64, T_test, n_neurons) * torch.sqrt(Q)
+            dataloader = DataLoader(y_mc, batch_size=32)
+            vae_mc.train_model(dataloader, 1e-4, weight_decay, 50)
+
+            # compute mse for each of dynamics parameter
+            with torch.no_grad():
+                theta_star = torch.cat([p.flatten() for p in rnn_dynamics.parameters()])
+                theta_mc = torch.cat([p.flatten() for p in rnn_mc.parameters()])
+                error = torch.norm(theta_star - theta_mc)
+            errors.append(error)
+
+        vae_mcs.append(copy.deepcopy(vae_mc))
+        error_state.append(torch.tensor(errors).cpu())
+
+    # %%
+    mean_error = torch.stack(error_state).mean(dim=1).cpu()
+    std_error = torch.stack(error_state).std(dim=1).cpu()
+
+    # scatter plot fim x error_state. Repeat fim n_mc times
+    plt.errorbar(torch.arange(num_test).cpu(), mean_error, yerr=std_error)
+    fims_scatter = torch.tensor(fims).repeat(n_mc, 1).cpu()
+    plt.scatter(fims_scatter, error_state)
+    print(fims)
+
+    # %%
+    fig, ax = plt.subplots(2, 3, figsize=(15, 10))
+    f_true.streamplot(ax=ax[0, 0])
+    for i in range(1, 6):
+        plot_vector_field(vae_mcs[i - 1].dynamics, ax=ax[i // 3, i % 3])
+        plt.title(f"mean error: {mean_error[i-1]:.4f}, CRLB: {fims[i-1]:.4f}")
+    plt.show()
     # %% Step 4: Create Deep Ensemble Network to approximate the dynamics
     # n_ensemble = 5
-
     # dynamics_list = [RNNDynamics(d_latent, device=device) for _ in range(n_ensemble)]
     # # Initialize each dynamics differently
     # for dynamics in dynamics_list:
@@ -88,5 +147,3 @@ if __name__ == "__main__":
     #         lambda m: m.reset_parameters() if hasattr(m, "reset_parameters") else None
     #     )
     # ensemble_vae = EnsembleSeqVae(dynamics_list, encoder, decoder, device=device)
-
-    # Step 5: Update the inference model and evaluate the model accuracy

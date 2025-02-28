@@ -31,7 +31,7 @@ def compute_vector_field(dynamics, x_range=2.5, n_grid=50, device="cpu"):
     return X, Y, U, V
 
 
-def plot_vector_field(dynamics, **kwargs):
+def plot_vector_field(dynamics, ax=None, **kwargs):
     if hasattr(dynamics, "X"):
         X, Y, U, V = dynamics.X, dynamics.Y, dynamics.U, dynamics.V
     else:
@@ -40,6 +40,8 @@ def plot_vector_field(dynamics, **kwargs):
     speed = np.sqrt(U**2 + V**2)
 
     plt.figure(figsize=(10, 8))
+    if ax is not None:
+        plt.sca(ax)
     plt.streamplot(
         X,
         Y,
@@ -50,7 +52,8 @@ def plot_vector_field(dynamics, **kwargs):
         density=2,
         cmap="viridis",
     )
-    plt.colorbar(label="Speed", aspect=20)
+    if ax is None:
+        plt.colorbar(label="Speed", aspect=20)
     plt.xlabel("Latent Dimension 1")
     plt.ylabel("Latent Dimension 2")
     plt.title("Vector Field of Latent Dynamics")
