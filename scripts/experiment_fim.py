@@ -82,15 +82,10 @@ if __name__ == "__main__":
     fisher = FisherMetrics(
         dynamics=rnn_dynamics_hat, decoder=decoder, process_noise=R, measurement_noise=Q
     )
-    initial_states = torch.rand(num_test, d_latent) * 5 - 2.5
+    # initial_states = torch.rand(num_test, d_latent) * 5 - 2.5
     initial_cov = torch.eye(d_latent, device=device)
 
-    fims = []
-    for i in range(num_test):
-        fim = fisher.compute_fim(
-            initial_states[i].unsqueeze(0), T_test, initial_cov, use_diag=True
-        )
-        fims.append(fim)
+    fims = fisher.compute_fim(initial_states, T_test, initial_cov, use_diag=True)
 
     # %% Step 6: Monte Carlo simulation to estimate CRLB
     n_mc = 100
@@ -109,7 +104,7 @@ if __name__ == "__main__":
 
             y_mc = (x_mc[i] @ C.T) + torch.randn(64, T_test, n_neurons) * torch.sqrt(Q)
             dataloader = DataLoader(y_mc, batch_size=32)
-            vae_mc.train_model(dataloader, 1e-4, weight_decay, 50)
+            vae_mc.train_model(dataloader, 1e-4, weight_decay, 25)
 
             # compute mse for each of dynamics parameter
             with torch.no_grad():
@@ -127,8 +122,8 @@ if __name__ == "__main__":
 
     # scatter plot fim x error_state. Repeat fim n_mc times
     plt.errorbar(torch.arange(num_test).cpu(), mean_error, yerr=std_error)
-    fims_scatter = torch.tensor(fims).repeat(n_mc, 1).cpu()
-    plt.scatter(fims_scatter, error_state)
+    # fims_scatter = torch.tensor(fims).repeat(n_mc, 1).cpu()
+    # plt.scatter(fims_scatter, error_state)
     print(fims)
 
     # %%
@@ -136,8 +131,10 @@ if __name__ == "__main__":
     f_true.streamplot(ax=ax[0, 0])
     for i in range(1, 6):
         plot_vector_field(vae_mcs[i - 1].dynamics, ax=ax[i // 3, i % 3])
+        plt.plot(x_mc.cpu()[i - 1, :, 0], x_mc.cpu()[i - 1, :, 1])
         plt.title(f"mean error: {mean_error[i-1]:.4f}, CRLB: {fims[i-1]:.4f}")
     plt.show()
+
     # %% Step 4: Create Deep Ensemble Network to approximate the dynamics
     # n_ensemble = 5
     # dynamics_list = [RNNDynamics(d_latent, device=device) for _ in range(n_ensemble)]
