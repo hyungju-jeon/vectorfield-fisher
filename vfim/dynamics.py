@@ -34,6 +34,36 @@ class DynamicsWrapper:
         return plot_vector_field(self.model, **kwargs)
 
 
+class LinearDynamics(nn.Module):
+    def __init__(self, A, B, R, device="cpu"):
+        super().__init__()
+        self.A = nn.Parameter(A.to(device), requires_grad=True)
+        self.B = nn.Parameter(B.to(device), requires_grad=True)
+        self.device = device
+        self.R = R
+
+    def compute_param(self, x):
+        return x @ self.A + self.B
+
+    def sample_forward(self, x, k=1, var=None, return_trajectory=False):
+        x_samples = [x]
+        mus = []
+        var = self.R
+        for i in range(k):
+            mus.append(self(x_samples[i]) + x_samples[i])
+            x_samples.append(
+                mus[i] + torch.sqrt(var) * torch.randn_like(mus[i], device=x.device)
+            )
+
+        if return_trajectory:
+            return torch.cat(x_samples, dim=-2)[..., 1:, :], torch.cat(mus, dim=-2), var
+        else:
+            return x_samples[-1], mus[-1], var
+
+    def forward(self, x):
+        return self.compute_param(x)
+
+
 class RNNDynamics(nn.Module):
     """RNN-based dynamics model that predicts state transitions.
 
@@ -45,7 +75,7 @@ class RNNDynamics(nn.Module):
         device (str, optional): Device to run the model on. Defaults to "cpu".
     """
 
-    def __init__(self, dx, dh=256, fixed_variance=True, device="cpu"):
+    def __init__(self, dx, dh=128, fixed_variance=True, device="cpu"):
         super().__init__()
 
         self.dx = dx

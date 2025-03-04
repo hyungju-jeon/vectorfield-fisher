@@ -210,7 +210,7 @@ class FisherMetrics:
             # Prediction step
             df_dz = self.compute_jacobian_state(self.dynamics, z).detach()
             if use_kfac or self.use_kfac:
-                B = self.compute_jacobian_params_kfac(z)  # B = ∂f/∂θ
+                B = self.compute_jacobian_params_kfac(z).detach()  # B = ∂f/∂θ
             else:
                 B = self.compute_jacobian_params(self.dynamics, z).detach()
 
@@ -230,16 +230,16 @@ class FisherMetrics:
             dz_dtheta = (A @ dz_dtheta + B).detach()
 
             # Propagate covariance sensitivity
-            # dA_dtheta = torch.autograd.functional.jacobian(
-            #     lambda z_in: self.compute_jacobian_params(
-            #         self.dynamics, z_in, create_graph=True
-            #     ),
-            #     z,
-            # )  # dA_dtheta = ∂^2f/∂z∂θ +  (∂^2f/∂z^2) ∂z/∂θ
-            # dA_dtheta = dA_dtheta.permute(1, 0, 2)
+            dA_dtheta = torch.autograd.functional.jacobian(
+                lambda z_in: self.compute_jacobian_params(
+                    self.dynamics, z_in, create_graph=True
+                ),
+                z,
+            )  # dA_dtheta = ∂^2f/∂z∂θ +  (∂^2f/∂z^2) ∂z/∂θ
+            dA_dtheta = dA_dtheta.permute(1, 0, 2)
 
             # Central difference approximation for dA_dtheta
-            dA_dtheta = self.compute_dA_dtheta_finite_diff(z).detach()
+            # dA_dtheta = self.compute_dA_dtheta_finite_diff(z).detach()
 
             new_dP = (
                 dA_dtheta @ P @ A.T + A @ dP @ A.T + A @ P @ dA_dtheta.permute(0, 2, 1)
@@ -281,10 +281,7 @@ class FisherMetrics:
                 )
                 sigma_dsigma = sigma_inv @ dsigma_dtheta
                 cov_term = torch.einsum("tij,tji->t", sigma_dsigma, sigma_dsigma)
-                # for i, idx in enumerate(indices):
-                #     sigma_dsigma = sigma_inv @ dsigma_dtheta[idx]
-                #     mean_term[i] += 0.5 * torch.trace(sigma_dsigma @ sigma_dsigma)
-                fim += torch.sum(mean_term + cov_term[indices]).cpu()
+                fim += (mean_term + cov_term[indices]).cpu()
             else:
                 sigma_inv = torch.inverse(sigma)
                 mean_term = de_dtheta.T @ sigma_inv @ de_dtheta
@@ -295,34 +292,11 @@ class FisherMetrics:
                         trace_term = torch.trace(
                             sigma_inv @ dsigma_dtheta[i] @ sigma_inv @ dsigma_dtheta[j]
                         )
-                        print(trace_term)
                         cov_term[i, j] = 0.5 * trace_term
 
                 fim += mean_term + cov_term
 
-        # Garbage collect all variables
-        del (
-            z,
-            P,
-            dz_dtheta,
-            dP,
-            I,
-            indices,
-            df_dz,
-            B,
-            A,
-            P_new,
-            dA_dtheta,
-            new_dP,
-            H,
-            sigma,
-            de_dtheta,
-            dsigma_dtheta,
-            sigma_inv,
-            mean_term,
-            cov_term,
-        )
-        return fim / n_params / trajectory_length
+        return fim
 
 
 # ----------------------------
