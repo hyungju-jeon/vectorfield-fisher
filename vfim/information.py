@@ -215,14 +215,14 @@ class FisherMetrics:
                 B = self.compute_jacobian_params(self.dynamics, z).detach()
 
             # Select only parameters that are sensitive
-            threshold = 0
-            indices = (torch.norm(B.detach().cpu(), dim=0) > threshold).nonzero(
-                as_tuple=True
-            )[0]
+            # threshold = 0
+            # indices = (torch.norm(B.detach().cpu(), dim=0) > threshold).nonzero(
+            #     as_tuple=True
+            # )[0]
 
             # Update state and covariance
-            z = z + self.dynamics(z)
-            A = (I + df_dz).detach()  # A = I + ∂f/∂z
+            z_new = z + self.dynamics(z)
+            A = I + df_dz  # A = I + ∂f/∂z
             P_new = (A @ P @ A.T + self.Q).detach()
 
             # Predictive Step
@@ -230,16 +230,16 @@ class FisherMetrics:
             dz_dtheta = (A @ dz_dtheta + B).detach()
 
             # Propagate covariance sensitivity
-            dA_dtheta = torch.autograd.functional.jacobian(
-                lambda z_in: self.compute_jacobian_params(
-                    self.dynamics, z_in, create_graph=True
-                ),
-                z,
-            )  # dA_dtheta = ∂^2f/∂z∂θ +  (∂^2f/∂z^2) ∂z/∂θ
-            dA_dtheta = dA_dtheta.permute(1, 0, 2)
+            # dA_dtheta = torch.autograd.functional.jacobian(
+            #     lambda z_in: self.compute_jacobian_params(
+            #         self.dynamics, z_in, create_graph=True
+            #     ),
+            #     z,
+            # )  # dA_dtheta = ∂^2f/∂z∂θ +  (∂^2f/∂z^2) ∂z/∂θ
+            # dA_dtheta = dA_dtheta.permute(1, 0, 2)
 
             # Central difference approximation for dA_dtheta
-            # dA_dtheta = self.compute_dA_dtheta_finite_diff(z).detach()
+            dA_dtheta = self.compute_dA_dtheta_finite_diff(z).detach()
 
             new_dP = (
                 dA_dtheta @ P @ A.T + A @ dP @ A.T + A @ P @ dA_dtheta.permute(0, 2, 1)
@@ -268,6 +268,7 @@ class FisherMetrics:
             #     deltaH[i] @ P @ H.T + H @ dP[i] @ H.T + H @ P @ deltaH[i].T
             # )
             dsigma_dtheta = H @ dP @ H.T
+            z = z_new
 
             # Update FIM
             if use_diag:

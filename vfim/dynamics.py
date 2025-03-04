@@ -48,7 +48,8 @@ class LinearDynamics(nn.Module):
     def sample_forward(self, x, k=1, var=None, return_trajectory=False):
         x_samples = [x]
         mus = []
-        var = self.R
+        if var is None:
+            var = self.R
         for i in range(k):
             mus.append(self(x_samples[i]) + x_samples[i])
             x_samples.append(
@@ -149,7 +150,8 @@ class RNNDynamics(nn.Module):
                     means (torch.Tensor): Full trajectory of predicted means.
                     var (torch.Tensor): Prediction variance.
         """
-        var = softplus(self.logvar) + eps
+        if var is None:
+            var = softplus(self.logvar) + eps
 
         x_samples, mus = [x], []
         for i in range(k):
