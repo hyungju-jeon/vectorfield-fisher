@@ -31,18 +31,20 @@ class NormalDecoder(nn.Module):
         super().__init__()
         self.device = device
         if C is not None:
-            self.decoder = (
-                nn.Linear(dx, dy, bias=False).to(device).requires_grad_(False)
-            )
-            self.decoder.weight.data = C
+            # z ~ exp(Cy)
+
+            self.linear = nn.Linear(dx, dy, bias=False).to(device).requires_grad_(False)
+            self.linear.weight.data = C
+            self.decoder = nn.Sequential(self.linear, nn.ReLU()).to(device)
+
         else:
             # Remove bias from linear layer
             self.decoder = nn.Linear(dx, dy, bias=False).to(device)
+            self.normalize_weights()  # Initialize with normalized weights
         self.logvar = nn.Parameter(
             0.01 * torch.randn(1, dy, device=device), requires_grad=True
         )
         self.l2 = l2
-        self.normalize_weights()  # Initialize with normalized weights
 
     def normalize_weights(self):
         """Normalize decoder matrix C to have unit Frobenius norm."""
@@ -86,7 +88,7 @@ class NormalDecoder(nn.Module):
             torch.Tensor: Log probability of input data.
         """
         # Normalize weights before forward pass
-        self.normalize_weights()
+        # self.normalize_weights()
         # given samples, compute parameters of likelihood
         mu, var = self.compute_param(samples)
 
@@ -94,8 +96,8 @@ class NormalDecoder(nn.Module):
         log_prob = torch.sum(Normal(mu, torch.sqrt(var)).log_prob(x), (-1, -2))
 
         # add regularization
-        if self.l2 > 0:
-            log_prob = log_prob - self.get_regularization()
+        # if self.l2 > 0:
+        #     log_prob = log_prob - self.get_regularization()
 
         return log_prob
 
