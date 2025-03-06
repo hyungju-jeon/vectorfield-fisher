@@ -333,8 +333,8 @@ if __name__ == "__main__":
     #  Step 4: Initialize VAE for f_hat with fewer training data
     K = 50
 
-    x_train = x_star[K:]
-    y_train = y_star[K:]
+    x_train = x_star[:K]
+    y_train = y_star[:K]
 
     # encoder_hat = Encoder(d_obs, d_latent, d_hidden, device=device)
     encoder_hat = Encoder(d_obs, d_latent, d_hidden, device=device)
@@ -413,5 +413,5 @@ if __name__ == "__main__":
     for i in range(1, 6):
         plot_vector_field(vae_mcs[i - 1].dynamics, ax=ax[i // 3, i % 3])
         plt.plot(x_mcs[i - 1].cpu()[:, 0], x_mcs[i - 1].cpu()[:, 1])
-        plt.title(f"mean error: {mean_error[i-1]:.4f}, Information: {CRLB[i-1]:.4f}")
+        # plt.title(f"mean error: {mean_error[i-1]:.4f}, Information: {CRLB[i-1]:.4f}")
     plt.show()
