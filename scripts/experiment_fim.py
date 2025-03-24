@@ -3,13 +3,13 @@ import torch
 import matplotlib.pyplot as plt
 import copy
 from torch.utils.data import DataLoader
-from vfim.dynamics import DynamicsWrapper, RNNDynamics, LinearDynamics
-from vfim.vector_field import VectorField
-from vfim.encoder import Encoder
-from vfim.decoder import NormalDecoder
-from vfim.models import SeqVae, EnsembleSeqVae
+from vfim.model.dynamics import DynamicsWrapper, RNNDynamics, LinearDynamics
+from data.vector_field import VectorField
+from vfim.model.encoder import Encoder
+from vfim.model.decoder.decoder import NormalDecoder
+from vfim.model import SeqVae, EnsembleSeqVae
 from vfim.information import FisherMetrics
-from vfim.visualize import plot_vector_field
+from vfim.utils.visualize import plot_vector_field
 
 
 def test_linear_dynamics():

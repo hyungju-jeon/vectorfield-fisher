@@ -76,7 +76,17 @@ class VectorField:
         if self.xy is None:
             raise ValueError("Grid not initialized. Call create_grid first.")
 
-        self.U, self.V = generate_random_vector_field(self.model, self.xy, **kwargs)
+        if self.xy is None:
+            raise ValueError("xy coordinates must be provided")
+
+        if self.model == "multi":
+            self.U, self.V = multi_attractor(self.xy, **kwargs)
+        elif self.model == "ring":
+            pass
+        elif self.model == "limitcycle":
+            self.U, self.V = limit_cycle(self.xy, **kwargs)
+        else:
+            raise ValueError(f"Unsupported model: {self.model}")
 
     @torch.no_grad()
     def interpolate(self, x: ArrayType) -> ArrayType:
@@ -131,31 +141,26 @@ class VectorField:
             return x_samples[-1], mus[-1]
 
 
-def generate_random_vector_field(
-    model: ModelType = "multi", xy: Optional[ArrayType] = None, **kwargs
+def limit_cycle(
+    xy: ArrayType,
+    w: float = 1,
+    d: float = 1.0,
+    random_seed: int = 49,
+    **kwargs,
 ) -> Tuple[ArrayType, ArrayType]:
-    """Factory function for generating different types of vector fields.
+    torch.manual_seed(random_seed)
+    grid_size = int(torch.sqrt(torch.tensor(xy.shape[0])))
+    r = torch.sqrt(xy[:, 0] ** 2 + xy[:, 1] ** 2)
+    U = xy[:, 0] * (d - r**2) - w * xy[:, 1]
+    V = xy[:, 1] * (d - r**2) + w * xy[:, 0]
 
-    Args:
-        model: Type of vector field to generate.
-        xy: Grid points coordinates.
-        **kwargs: Additional model-specific parameters.
+    speed = torch.sqrt(U**2 + V**2)
+    speed = speed.max()
 
-    Returns:
-        tuple: Contains:
-            - U (ArrayType): X components of the vector field
-            - V (ArrayType): Y components of the vector field
+    U = U / speed
+    V = V / speed
 
-    Raises:
-        ValueError: If xy coordinates are not provided or model is not supported.
-    """
-    if xy is None:
-        raise ValueError("xy coordinates must be provided")
-
-    if model == "multi":
-        return multi_attractor(xy, **kwargs)
-    else:
-        raise ValueError(f"Unsupported model: {model}")
+    return U.reshape(grid_size, grid_size), V.reshape(grid_size, grid_size)
 
 
 def multi_attractor(

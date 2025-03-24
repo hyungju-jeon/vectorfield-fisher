@@ -1,9 +1,7 @@
-import enum
-from locale import nl_langinfo
+from tqdm import tqdm
 import torch
 import torch.nn as nn
 import numpy as np
-from functorch import make_functional, jacrev
 
 eps = 1e-6
 
@@ -147,7 +145,6 @@ class FisherMetrics:
         if len(initial_state.shape) > 1:
             fim_list = []
             for state in initial_state:
-                print(f"Computing FIM for initial state: {state}")
                 fim_list.append(
                     self._compute_fim_point(
                         state,
@@ -196,8 +193,8 @@ class FisherMetrics:
         n_params = sum(p.numel() for p in params)
 
         fim = 0
-        z = initial_state
-        P = initial_cov
+        z_filter = initial_state
+        P_filter = initial_cov
         dz_dtheta = torch.zeros(d_latent, n_params, device=self.device)  # Ψ = ∂z/∂θ
         # Initialize covariance sensitivity
         # ∂P/∂θ (n_state x n_state x n_params), assume P0 independent of θ.
@@ -205,51 +202,46 @@ class FisherMetrics:
         I = torch.eye(d_latent, device=self.device)
         indices = torch.arange(n_params)
 
-        for k in range(trajectory_length):
-            print(f"Predicting step {k+1}/{trajectory_length}")
+        for _ in range(trajectory_length):
             # Prediction step
-            df_dz = self.compute_jacobian_state(self.dynamics, z).detach()
+            df_dz = self.compute_jacobian_state(self.dynamics, z_filter).detach()
             if use_kfac or self.use_kfac:
-                B = self.compute_jacobian_params_kfac(z)  # B = ∂f/∂θ
+                B = self.compute_jacobian_params_kfac(z_filter)  # B = ∂f/∂θ
             else:
-                B = self.compute_jacobian_params(self.dynamics, z).detach()
-
-            # Select only parameters that are sensitive
-            threshold = 0
-            indices = (torch.norm(B.detach().cpu(), dim=0) > threshold).nonzero(
-                as_tuple=True
-            )[0]
+                B = self.compute_jacobian_params(self.dynamics, z_filter).detach()
 
             # Update state and covariance
-            z = z + self.dynamics(z)
+            z_filter = z_filter + self.dynamics(z_filter)
             A = (I + df_dz).detach()  # A = I + ∂f/∂z
-            P_new = (A @ P @ A.T + self.Q).detach()
+            P_new = (A @ P_filter @ A.T + self.Q).detach()
 
             # Predictive Step
             # Propagate state sensitivity: Ψ_new = A Ψ + ∂f/∂θ.
             dz_dtheta = (A @ dz_dtheta + B).detach()
 
             # Propagate covariance sensitivity
-            dA_dtheta = torch.autograd.functional.jacobian(
-                lambda z_in: self.compute_jacobian_params(
-                    self.dynamics, z_in, create_graph=True
-                ),
-                z,
-            )  # dA_dtheta = ∂^2f/∂z∂θ +  (∂^2f/∂z^2) ∂z/∂θ
+            # dA_dtheta = torch.autograd.functional.jacobian(
+            #     lambda z_in: self.compute_jacobian_params(
+            #         self.dynamics, z_in, create_graph=True
+            #     ),
+            #     z,
+            # )  # dA_dtheta = ∂^2f/∂z∂θ +  (∂^2f/∂z^2) ∂z/∂θ
             # dA_dtheta = dA_dtheta.permute(1, 0, 2)
 
             # Central difference approximation for dA_dtheta
-            dA_dtheta = self.compute_dA_dtheta_finite_diff(z).detach()
+            dA_dtheta = self.compute_dA_dtheta_finite_diff(z_filter).detach()
 
             new_dP = (
-                dA_dtheta @ P @ A.T + A @ dP @ A.T + A @ P @ dA_dtheta.permute(0, 2, 1)
+                dA_dtheta @ P_filter @ A.T
+                + A @ dP @ A.T
+                + A @ P_filter @ dA_dtheta.permute(0, 2, 1)
             ).detach()
             dP = new_dP.detach()
-            P = P_new.detach()
+            P_filter = P_new.detach()
 
             # Measurement step
-            H = self.compute_jacobian_state(self.decoder, z).detach()
-            sigma = (H @ P @ H.T + self.R).detach()
+            H = self.compute_jacobian_state(self.decoder, z_filter).detach()
+            sigma = (H @ P_filter @ H.T + self.R).detach()
             de_dtheta = (-H @ dz_dtheta).detach()
 
             # Compute Sigma derivatives
@@ -260,14 +252,15 @@ class FisherMetrics:
             #     for j in range(d_latent):
             #         deltaH[i] += dH_dz[j] * dz_dtheta[j, i]
             # Now, for each parameter, compute Δ_i Σ = (Δ_i H) P Hᵀ + H (dP[:,:,i]) Hᵀ + H P (Δ_i H)ᵀ.
-            dsigma_dtheta = torch.zeros(
-                n_params, sigma.shape[0], sigma.shape[1], device=self.device
-            ).detach()
+            # dsigma_dtheta = torch.zeros(
+            #     n_params, sigma.shape[0], sigma.shape[1], device=self.device
+            # ).detach()
             # for i in indices:
             # dsigma_dtheta[i] = (
             #     deltaH[i] @ P @ H.T + H @ dP[i] @ H.T + H @ P @ deltaH[i].T
             # )
             dsigma_dtheta = H @ dP @ H.T
+            dsigma_dtheta = dsigma_dtheta.detach()
 
             # Update FIM
             if use_diag:
@@ -286,7 +279,7 @@ class FisherMetrics:
                 #     mean_term[i] += 0.5 * torch.trace(sigma_dsigma @ sigma_dsigma)
                 fim += (mean_term + cov_term[indices]).cpu()
             else:
-                sigma_inv = torch.inverse(sigma)
+                sigma_inv = torch.inverse(sigma + eps * torch.eye(sigma.shape[0]))
                 mean_term = de_dtheta.T @ sigma_inv @ de_dtheta
                 cov_term = torch.zeros(n_params, n_params, device=self.device)
 
@@ -295,34 +288,14 @@ class FisherMetrics:
                         trace_term = torch.trace(
                             sigma_inv @ dsigma_dtheta[i] @ sigma_inv @ dsigma_dtheta[j]
                         )
-                        print(trace_term)
                         cov_term[i, j] = 0.5 * trace_term
 
                 fim += mean_term + cov_term
 
-        # Garbage collect all variables
-        del (
-            z,
-            P,
-            dz_dtheta,
-            dP,
-            I,
-            indices,
-            df_dz,
-            B,
-            A,
-            P_new,
-            dA_dtheta,
-            new_dP,
-            H,
-            sigma,
-            de_dtheta,
-            dsigma_dtheta,
-            sigma_inv,
-            mean_term,
-            cov_term,
-        )
-        return fim / n_params / trajectory_length
+        if use_diag:
+            return fim
+        else:
+            return torch.diag((fim))
 
 
 # ----------------------------

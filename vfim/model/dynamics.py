@@ -3,7 +3,7 @@ import torch.nn as nn
 import numpy as np
 from torch.distributions import Normal
 from torch.nn.functional import softplus
-from vfim.visualize import plot_vector_field
+from vfim.utils.visualize import plot_vector_field
 
 
 # Small constant to prevent numerical instability
@@ -238,11 +238,11 @@ class EnsembleRNN(nn.Module):
         # Total variance includes both model uncertainty and prediction uncertainty
         total_variance = vars.mean(dim=0) + means.var(dim=0)
 
-        return samples.mean(dim=0), mean_prediction, total_variance
+        return samples, mean_prediction, total_variance
 
     def forward(self, x):
         """Forward pass averages predictions from all ensemble members."""
         predictions = []
         for model in self.models:
             predictions.append(model(x))
-        return torch.stack(predictions).mean(dim=0)
+        return torch.stack(predictions)

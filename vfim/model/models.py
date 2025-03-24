@@ -1,9 +1,7 @@
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from vfim.dynamics import RNNDynamics, EnsembleRNN
-from vfim.encoder import Encoder
-from vfim.decoder import NormalDecoder
+from vfim.model.dynamics import RNNDynamics, EnsembleRNN
 
 
 class SeqVae(nn.Module):
@@ -80,11 +78,11 @@ class SeqVae(nn.Module):
         elbo = torch.mean(log_like - beta * kl_d_x)
         return -elbo
 
-    def train_model(self, dataloader, lr, weight_decay, n_epochs):
+    def train_model(self, dataloader, lr, weight_decay, n_epochs, verbose=True):
         param_list = list(self.parameters())
         opt = torch.optim.AdamW(params=param_list, lr=lr, weight_decay=weight_decay)
         training_losses = []
-        for _ in tqdm(range(n_epochs)):
+        for _ in tqdm(range(n_epochs), disable=not verbose):
             for batch in dataloader:
                 opt.zero_grad()
                 loss = self.compute_elbo(batch.to(self.device))
@@ -106,7 +104,6 @@ class EnsembleSeqVae(nn.Module):
 
     def __init__(self, dynamics, encoder, decoder, device="cpu"):
         super().__init__()
-        assert isinstance(dynamics, EnsembleRNN), "dynamics must be EnsembleRNN"
         self.dynamics = dynamics
         self.encoder = encoder
         self.decoder = decoder
@@ -123,33 +120,62 @@ class EnsembleSeqVae(nn.Module):
         )
         return torch.sum(kl_d, (-1, -2))
 
-    def compute_elbo(self, y, n_samples=1, beta=1.0):
-        """Computes ELBO independently for each model in ensemble.
+    def _compute_kld_x(self, mu_q, var_q, x_samples, idx):
+        """Computes KLD between the posterior and prior distribution.
+
+        Args:
+            mu_q (torch.Tensor): Mean of posterior distribution with shape (..., T, D).
+            var_q (torch.Tensor): Variance of posterior distribution with shape (..., T, D).
+            x_samples (torch.Tensor): Samples from distribution with shape (..., T+1, D).
+            idx (int): Index of the dynamics model to use.
+
+        Returns:
+            torch.Tensor: KL divergence between posterior and prior distributions.
+        """
+
+        _, mu_p_x, var_p_x = self.dynamics.models[idx].sample_forward(
+            x_samples[..., :-1, :]
+        )
+        kl_d = self._kl_div(mu_q[..., 1:, :], var_q[..., 1:, :], mu_p_x, var_p_x)
+
+        return kl_d
+
+    def compute_elbo(self, y, idx, n_samples=1, beta=1.0):
+        """Computes Evidence Lower Bound (ELBO) for given data.
 
         Args:
             y (torch.Tensor): Observed data.
-            n_samples (int, optional): Number of samples from posterior.
-            beta (float, optional): KL divergence weight.
+            idx (int): Index of the dynamics model to use.
+            n_samples (int, optional): Number of samples from variational posterior.
+            beta (float, optional): Weight for KL divergence term.
 
         Returns:
-            torch.Tensor: Average negative ELBO across ensemble.
+            torch.Tensor: Negative ELBO value.
         """
         x_samples, mu_q_x, var_q_x, log_q = self.encoder(y, n_samples=n_samples)
+        kl_d_x = self._compute_kld_x(mu_q_x, var_q_x, x_samples, idx)
+        log_like = self.decoder.compute_log_prob(x_samples, y)
+        elbo = torch.mean(log_like - beta * kl_d_x)
+        return -elbo
 
-        # Compute ELBO for each model
-        elbos = []
-        for model in self.dynamics.models:
-            # Use individual model for KLD computation
-            _, mu_p_x, var_p_x = model.sample_forward(x_samples[..., :-1, :])
-            kl_d = self._kl_div(
-                mu_q_x[..., 1:, :], var_q_x[..., 1:, :], mu_p_x, var_p_x
+    def train_model(self, dataloader, lr, weight_decay, n_epochs, verbose=True):
+        for i in range(self.dynamics.n_models):
+            param_list = (
+                list(self.dynamics.models[i].parameters())
+                + list(self.encoder.parameters())
+                + list(self.decoder.parameters())
             )
 
-            log_like = self.decoder.compute_log_prob(x_samples, y)
-            elbo = torch.mean(log_like - beta * kl_d)
-            elbos.append(-elbo)
-
-        return torch.mean(torch.stack(elbos))
+            opt = torch.optim.AdamW(params=param_list, lr=lr, weight_decay=weight_decay)
+            training_losses = []
+            for _ in tqdm(range(n_epochs), disable=not verbose):
+                for batch in dataloader:
+                    opt.zero_grad()
+                    loss = self.compute_elbo(batch.to(self.device), i)
+                    loss.backward()
+                    opt.step()
+                    with torch.no_grad():
+                        training_losses.append(loss.item())
 
 
 if __name__ == "__main__":
