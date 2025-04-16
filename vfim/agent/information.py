@@ -297,6 +297,62 @@ class FisherMetrics:
         else:
             return torch.diag((fim))
 
+    def compute_fim_trajectory(self, z, use_diag=True):
+        """Compute Fisher Information Matrix for a trajectory.
+
+        Args:
+            z (torch.Tensor): Trajectory of states of shape (T, n_state)
+            use_diag (bool): If True, use diagonal approximation for FIM
+
+        Returns:
+            torch.Tensor: Fisher Information Matrix of shape (n_params, n_params)
+        """
+        T = z.shape[0]
+        d_latent = z.shape[1]
+        params = list(self.dynamics.parameters())
+        n_params = sum(p.numel() for p in params)
+        I = torch.eye(d_latent, device=self.device)
+        fim = 0
+        dz_dtheta = torch.zeros(d_latent, n_params, device=self.device)  # Ψ = ∂z/∂θ
+
+        z_t = z  # Trajectory of states (T, n_state)
+        df_dz = torch.stack(
+            [self.compute_jacobian_state(self.dynamics, z_i).detach() for z_i in z_t]
+        )  # (T, n_state, n_state)
+        B = torch.stack(
+            [self.compute_jacobian_params(self.dynamics, z_i).detach() for z_i in z_t]
+        )  # (T, n_state, n_params)
+
+        # Update state and covariance
+        A = (I + df_dz).detach()  # (T, n_state, n_state)
+
+        # Predictive Step
+        dz_dtheta = torch.cumsum(
+            torch.einsum("tij,tjk->tik", A, dz_dtheta.unsqueeze(0)) + B, dim=0
+        ).detach()  # (T, n_state, n_params)
+
+        # Measurement step
+        H = torch.stack(
+            [self.compute_jacobian_state(self.decoder, z_i).detach() for z_i in z_t]
+        )  # (T, n_obs, n_state)
+        sigma = self.R.unsqueeze(0).expand(T, -1, -1).detach()  # (T, n_obs, n_obs)
+        de_dtheta = (
+            -torch.einsum("tij,tjk->tik", H, dz_dtheta)
+        ).detach()  # (T, n_obs, n_params)
+
+        # Update FIM
+        if use_diag:
+            sigma_inv = torch.diag_embed(
+                torch.reciprocal(torch.diagonal(sigma, dim1=1, dim2=2))
+            )  # (T, n_obs, n_obs)
+            mean_term = torch.sum(
+                de_dtheta * torch.einsum("tij,tjk->tik", sigma_inv, de_dtheta),
+                dim=(1, 2),
+            )  # (T,)
+            fim = torch.sum(1.0 / mean_term)  # Scalar
+
+        return fim.cpu()
+
 
 # ----------------------------
 # Main script

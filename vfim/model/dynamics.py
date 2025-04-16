@@ -45,13 +45,16 @@ class LinearDynamics(nn.Module):
     def compute_param(self, x):
         return x @ self.A + self.B
 
-    def sample_forward(self, x, k=1, var=None, return_trajectory=False):
+    def sample_forward(self, x, input=None, k=1, var=None, return_trajectory=False):
         x_samples = [x]
         mus = []
         if var is None:
             var = self.R
         for i in range(k):
-            mus.append(self(x_samples[i]) + x_samples[i])
+            if input is not None:
+                mus.append(self(x_samples[i]) + x_samples[i] + input[i])
+            else:
+                mus.append(self(x_samples[i]) + x_samples[i])
             x_samples.append(
                 mus[i] + torch.sqrt(var) * torch.randn_like(mus[i], device=x.device)
             )
@@ -92,11 +95,12 @@ class RNNDynamics(nn.Module):
 
         self.prior = nn.Sequential(
             nn.Linear(dx, dh),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(dh, dh),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(dh, d_out),
         ).to(device)
+        # Resnet
         self.device = device
 
     @torch.no_grad()
@@ -130,7 +134,7 @@ class RNNDynamics(nn.Module):
 
         return mu, var
 
-    def sample_forward(self, x, k=1, var=None, return_trajectory=False):
+    def sample_forward(self, x, input=None, k=1, var=None, return_trajectory=False):
         """Generates samples from forward dynamics model.
 
         Args:
@@ -155,7 +159,10 @@ class RNNDynamics(nn.Module):
 
         x_samples, mus = [x], []
         for i in range(k):
-            mus.append(self(x_samples[i]) + x_samples[i])
+            if input is not None:
+                mus.append(self(x_samples[i]) + x_samples[i] + input[i])
+            else:
+                mus.append(self(x_samples[i]) + x_samples[i])
             x_samples.append(
                 mus[i] + torch.sqrt(var) * torch.randn_like(mus[i], device=x.device)
             )
@@ -211,7 +218,7 @@ class EnsembleRNN(nn.Module):
         self.n_models = n_models
         self.device = device
 
-    def sample_forward(self, x, k=1, var=None, return_trajectory=False):
+    def sample_forward(self, x, input=None, k=1, var=None, return_trajectory=False):
         """Generates samples using ensemble predictions.
 
         Each model in ensemble generates predictions independently.
@@ -223,7 +230,9 @@ class EnsembleRNN(nn.Module):
         all_vars = []
 
         for model in self.models:
-            samples, means, vars = model.sample_forward(x, k, var, return_trajectory)
+            samples, means, vars = model.sample_forward(
+                x, input, k, var, return_trajectory
+            )
             all_samples.append(samples)
             all_means.append(means)
             all_vars.append(vars)

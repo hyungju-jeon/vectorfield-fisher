@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import colorednoise
+from tqdm import tqdm
 
 
 class SimpleICem:
@@ -161,8 +162,10 @@ class SimpleICem:
 
             for t in range(self.horizon):
                 states[:, t + 1] = dynamics_fn(states[:, t], actions[:, t])
-                total_costs += cost_fn(states[:, t], goal, actions[:, t])
-            total_costs += cost_fn(states[:, -1], goal, actions[:, -1])
+                # total_costs += cost_fn(states[:, t], goal, actions[:, t])
+            # total_costs += cost_fn(states[:, -1], goal, actions[:, -1])
+            for n in range(actions.shape[0]):
+                total_costs[n] = cost_fn(states[n], goal)
 
             # Get elite samples
             elite_idxs = torch.topk(-total_costs, self.num_elites)[1]
@@ -191,4 +194,4 @@ class SimpleICem:
         self.prev_elite_actions = current_elite_actions
         self.prev_elite_states = current_elite_states
 
-        return best_first_action
+        return actions[min_cost_idx, :]

@@ -44,7 +44,7 @@ class SeqVae(nn.Module):
         )
         return torch.sum(kl_d, (-1, -2))
 
-    def _compute_kld_x(self, mu_q, var_q, x_samples):
+    def _compute_kld_x(self, mu_q, var_q, x_samples, input):
         """Computes KLD between the posterior and prior distribution.
 
         Args:
@@ -56,12 +56,14 @@ class SeqVae(nn.Module):
             torch.Tensor: KL divergence between posterior and prior distributions.
         """
 
-        _, mu_p_x, var_p_x = self.dynamics.sample_forward(x_samples[..., :-1, :])
+        _, mu_p_x, var_p_x = self.dynamics.sample_forward(
+            x_samples[..., :-1, :], input[..., :-1, :]
+        )
         kl_d = self._kl_div(mu_q[..., 1:, :], var_q[..., 1:, :], mu_p_x, var_p_x)
 
         return kl_d
 
-    def compute_elbo(self, y, n_samples=1, beta=1.0):
+    def compute_elbo(self, y, input=None, n_samples=1, beta=1.0):
         """Computes Evidence Lower Bound (ELBO) for given data.
 
         Args:
@@ -73,19 +75,26 @@ class SeqVae(nn.Module):
             torch.Tensor: Negative ELBO value.
         """
         x_samples, mu_q_x, var_q_x, log_q = self.encoder(y, n_samples=n_samples)
-        kl_d_x = self._compute_kld_x(mu_q_x, var_q_x, x_samples)
+        kl_d_x = self._compute_kld_x(mu_q_x, var_q_x, x_samples, input=input)
         log_like = self.decoder.compute_log_prob(x_samples, y)
         elbo = torch.mean(log_like - beta * kl_d_x)
         return -elbo
 
-    def train_model(self, dataloader, lr, weight_decay, n_epochs, verbose=True):
+    def train_model(
+        self, dataloader, lr, weight_decay, n_epochs, has_input=False, verbose=True
+    ):
         param_list = list(self.parameters())
         opt = torch.optim.AdamW(params=param_list, lr=lr, weight_decay=weight_decay)
         training_losses = []
         for _ in tqdm(range(n_epochs), disable=not verbose):
             for batch in dataloader:
                 opt.zero_grad()
-                loss = self.compute_elbo(batch.to(self.device))
+                if has_input:
+                    y = batch[..., :-2]
+                    input = batch[..., -2:]
+                    loss = self.compute_elbo(y.to(self.device), input.to(self.device))
+                else:
+                    loss = self.compute_elbo(batch.to(self.device))
                 loss.backward()
                 opt.step()
                 with torch.no_grad():
@@ -120,7 +129,7 @@ class EnsembleSeqVae(nn.Module):
         )
         return torch.sum(kl_d, (-1, -2))
 
-    def _compute_kld_x(self, mu_q, var_q, x_samples, idx):
+    def _compute_kld_x(self, mu_q, var_q, x_samples, input, idx):
         """Computes KLD between the posterior and prior distribution.
 
         Args:
@@ -134,13 +143,13 @@ class EnsembleSeqVae(nn.Module):
         """
 
         _, mu_p_x, var_p_x = self.dynamics.models[idx].sample_forward(
-            x_samples[..., :-1, :]
+            x_samples[..., :-1, :], input[..., :-1, :]
         )
         kl_d = self._kl_div(mu_q[..., 1:, :], var_q[..., 1:, :], mu_p_x, var_p_x)
 
         return kl_d
 
-    def compute_elbo(self, y, idx, n_samples=1, beta=1.0):
+    def compute_elbo(self, y, idx, input=None, n_samples=1, beta=1.0):
         """Computes Evidence Lower Bound (ELBO) for given data.
 
         Args:
@@ -153,12 +162,14 @@ class EnsembleSeqVae(nn.Module):
             torch.Tensor: Negative ELBO value.
         """
         x_samples, mu_q_x, var_q_x, log_q = self.encoder(y, n_samples=n_samples)
-        kl_d_x = self._compute_kld_x(mu_q_x, var_q_x, x_samples, idx)
+        kl_d_x = self._compute_kld_x(mu_q_x, var_q_x, x_samples, input, idx)
         log_like = self.decoder.compute_log_prob(x_samples, y)
         elbo = torch.mean(log_like - beta * kl_d_x)
         return -elbo
 
-    def train_model(self, dataloader, lr, weight_decay, n_epochs, verbose=True):
+    def train_model(
+        self, dataloader, lr, weight_decay, n_epochs, has_input=False, verbose=True
+    ):
         for i in range(self.dynamics.n_models):
             param_list = (
                 list(self.dynamics.models[i].parameters())
@@ -171,7 +182,14 @@ class EnsembleSeqVae(nn.Module):
             for _ in tqdm(range(n_epochs), disable=not verbose):
                 for batch in dataloader:
                     opt.zero_grad()
-                    loss = self.compute_elbo(batch.to(self.device), i)
+                    if has_input:
+                        y = batch[..., :-2]
+                        input = batch[..., -2:]
+                        loss = self.compute_elbo(
+                            y.to(self.device), input=input.to(self.device), idx=i
+                        )
+                    else:
+                        loss = self.compute_elbo(batch.to(self.device), i)
                     loss.backward()
                     opt.step()
                     with torch.no_grad():
