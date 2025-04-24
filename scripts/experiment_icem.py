@@ -400,9 +400,7 @@ if __name__ == "__main__":
         ax[1].set_title("Goal Dynamics")
         plt.show()
 
-        goal_fisher = find_local_maxima_variance_vector_output(
-            models_fisher["ensemble"], d_latent, init_x=states_fisher[-1]
-        ).to(device)
+c
         goal_goal = find_local_maxima_variance_vector_output(
             models_goal["ensemble"], d_latent, init_x=states_goal[-1]
         ).to(device)
@@ -415,27 +413,37 @@ if __name__ == "__main__":
     # plot_variance_map(var_map, xx, yy)
     # plt.plot(states_fisher.cpu().numpy()[:, 0], states_fisher.cpu().numpy()[:, 1])
 
+
 # %%
 # Create fisher information map by computing FIM on smapled point in the grid and intorpolate
-grid_x = torch.linspace(-2.5, 2.5, 25)
-grid_y = torch.linspace(-2.5, 2.5, 25)
-xx, yy = torch.meshgrid(grid_x, grid_y, indexing="ij")  # [H, W]
-grid = torch.stack([xx.flatten(), yy.flatten()], dim=1)
-# grid = torch.stack([xx, yy], dim=-1).reshape(-1, 2).to(device)  # [H*W, 2]
-fisher = FisherMetrics(
-    dynamics=models_fisher["fisher"].dynamics,
-    decoder=decoder,
-    process_noise=R * torch.eye(d_latent),
-    measurement_noise=Q * torch.eye(n_neurons),
-)
+def create_fisher_information_map(fisher, grid_size=25, x_range=2.5, show_plot=False):
+    """Create a Fisher information map by computing FIM on sampled points in the grid."""
+    grid_x = torch.linspace(-x_range, x_range, grid_size)
+    grid_y = torch.linspace(-x_range, x_range, grid_size)
+    xx, yy = torch.meshgrid(grid_x, grid_y, indexing="ij")  # [H, W]
+    grid = torch.stack([xx.flatten(), yy.flatten()], dim=1)
 
-fisher_map = [fisher.compute_fim_trajectory(x.unsqueeze(0)) for x in grid]
-fisher_map = torch.stack(fisher_map, dim=0).reshape(len(grid_x), len(grid_y))
+    fisher_map = [fisher.compute_fim_simple(x.unsqueeze(0)).sum() for x in grid]
+    fisher_map = torch.stack(fisher_map, dim=0).reshape(len(grid_x), len(grid_y))
+
+    if show_plot:
+        plt.contourf(xx.cpu(), yy.cpu(), fisher_map.cpu().T, levels=10, cmap="plasma")
+        plt.colorbar(label="Fisher Information")
+        plt.title("Fisher Information Map")
+        plt.xlabel("x₁")
+        plt.ylabel("x₂")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+    return fisher_map, xx, yy
 
 
-# [H, W]
-# plot_vector_field(models_fisher["fisher"].dynamics)
-plot_vector_field(models_fisher["fisher"].dynamics)
+
+# Example usage
+fisher_map, xx, yy = create_fisher_information_map(fisher)
+
+plot_vector_field(dynamics_model)
 plt.contourf(
     xx.cpu(), yy.cpu(), fisher_map.cpu().T, levels=10, cmap="plasma", alpha=0.3
 )

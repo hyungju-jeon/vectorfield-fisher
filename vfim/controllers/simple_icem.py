@@ -9,7 +9,7 @@ class SimpleICem:
         self,
         horizon,
         num_iterations=40,
-        population_size=64,
+        num_traj=64,
         num_elites=10,
         alpha=0.1,
         noise_beta=1.0,  # colored noise parameter
@@ -21,7 +21,7 @@ class SimpleICem:
     ):
         self.horizon = horizon
         self.num_iterations = num_iterations
-        self.population_size = population_size
+        self.num_traj = num_traj
         self.num_elites = num_elites
         self.alpha = alpha
         self.noise_beta = noise_beta
@@ -31,8 +31,11 @@ class SimpleICem:
         self.action_bounds = action_bounds
         self.init_std = init_std
 
-        self.prev_elite_actions = None
+        self.actions_from_prev_elites = None
         self.prev_elite_states = None
+
+        self.mean = None
+        self.stf = None
 
     def get_init_mean(self, action_dim, device):
         if self.action_bounds is not None:
@@ -53,26 +56,24 @@ class SimpleICem:
         return self.init_std * torch.ones(self.horizon, action_dim, device=device)
 
     def sample_action_sequences(
-        self, population_size, action_dim, action_mean, action_std, device
+        self, num_traj, action_dim, action_mean, action_std, device
     ):
         # Generate colored noise
         if self.noise_beta > 0:
             # Transpose for temporal correlations in last axis
-            noise = torch.tensor(
+            samples = torch.tensor(
                 colorednoise.powerlaw_psd_gaussian(
-                    self.noise_beta, size=(population_size, action_dim, self.horizon)
+                    self.noise_beta, size=(num_traj, action_dim, self.horizon)
                 ),
                 device=device,
                 dtype=torch.float32,
             ).transpose(
                 1, 2
-            )  # [population_size, horizon, action_dim]
+            )  # [num_traj, horizon, action_dim]
         else:
-            noise = torch.randn(
-                population_size, self.horizon, action_dim, device=device
-            )
+            samples = torch.randn(num_traj, self.horizon, action_dim, device=device)
 
-        actions = noise * action_std + action_mean
+        actions = samples * action_std + action_mean
 
         # Clip actions if bounds are provided
         if self.action_bounds is not None:
@@ -80,7 +81,7 @@ class SimpleICem:
         return actions
 
     def optimize(
-        self, initial_state, dynamics_fn, cost_fn, goal, action_dim, device="cpu"
+        self, initial_state, dynamics_fn, cost_fn, action_dim, goal=None, device="cpu"
     ):
         """
         Optimize trajectory using iterative Cross Entropy Method
@@ -94,17 +95,21 @@ class SimpleICem:
             executed_action: first action of the optimal sequence
         """
         batch_size = initial_state.shape[0]
+        initial_state = initial_state.squeeze(0)
 
-        # Initialize using the same strategy as original
-        action_mean = self.get_init_mean(action_dim, device)
+        ### Shift initialization ###
+        # Shift mean time-wise
+        if self.mean is None:
+            self.mean = self.get_init_mean(action_dim, device)
+        else:
+            self.mean[:-1] = self.mean[1:].clone()
         action_std = self.get_init_std(action_dim, device)
 
         best_cost = float("inf")
         best_first_action = None
         current_elite_actions = None
-        current_elite_states = None
 
-        current_population = self.population_size
+        current_population = self.num_traj
         for iteration in range(self.num_iterations):
             # Decay population size like original
             if iteration > 0:
@@ -117,10 +122,53 @@ class SimpleICem:
             actions = self.sample_action_sequences(
                 current_population,
                 action_dim,
-                action_mean.unsqueeze(0),
+                self.mean.unsqueeze(0),
                 action_std.unsqueeze(0),
                 device,
             )
+
+            # Add elite actions from previous environment step if available
+            if iteration == 0 and self.actions_from_prev_elites is not None:
+                num_prev_elites = int(
+                    self.actions_from_prev_elites.shape[0] * self.fraction_prev_elites
+                )
+                if num_prev_elites > 0:
+                    shifted_prev_actions = self.actions_from_prev_elites[
+                        :num_prev_elites, 1:
+                    ]
+                    # Sample new actions for the last timestep
+                    new_last_actions = self.sample_action_sequences(
+                        num_prev_elites,
+                        action_dim,
+                        self.mean,
+                        action_std,
+                        device,
+                    )
+                    shifted_prev_actions = torch.cat(
+                        [shifted_prev_actions, new_last_actions[:, -1:]], dim=1
+                    )
+                    actions = torch.cat([actions, shifted_prev_actions], dim=0)
+
+            # Forward simulation and cost calculation same as before
+            simulated_paths = torch.zeros(
+                actions.shape[0],
+                self.horizon + 1,
+                initial_state.shape[-1],
+                device=device,
+            )
+            simulated_paths[:, 0] = initial_state.repeat(actions.shape[0], 1)
+            total_costs = torch.zeros(actions.shape[0], device=device)
+
+            for t in range(self.horizon):
+                simulated_paths[:, t + 1] = dynamics_fn(
+                    simulated_paths[:, t], actions[:, t]
+                )
+                total_costs += cost_fn(
+                    simulated_paths[:, t],
+                    simulated_paths[:, t + 1],
+                    goal,
+                    actions[:, t],
+                )
 
             # Add elite actions from previous iteration if available
             if current_elite_actions is not None:
@@ -129,54 +177,20 @@ class SimpleICem:
                     actions = torch.cat(
                         [actions, current_elite_actions[:num_elites_to_keep]], dim=0
                     )
-
-            # Add elite actions from previous environment step if available
-            if iteration == 0 and self.prev_elite_actions is not None:
-                num_prev_elites = int(
-                    self.prev_elite_actions.shape[0] * self.fraction_prev_elites
-                )
-                if num_prev_elites > 0:
-                    prev_actions = self.prev_elite_actions[:num_prev_elites, 1:]
-                    # Sample new actions for the last timestep
-                    new_last_actions = self.sample_action_sequences(
-                        num_prev_elites,
-                        action_dim,
-                        action_mean[-1:],
-                        action_std[-1:],
-                        device,
+                    total_costs = torch.cat(
+                        [total_costs, current_elite_costs[:num_elites_to_keep]], dim=0
                     )
-                    prev_actions = torch.cat(
-                        [prev_actions, new_last_actions[:, -1:]], dim=1
-                    )
-                    actions = torch.cat([actions, prev_actions], dim=0)
-
-            # Forward simulation and cost calculation same as before
-            states = torch.zeros(
-                actions.shape[0],
-                self.horizon + 1,
-                initial_state.shape[-1],
-                device=device,
-            )
-            states[:, 0] = initial_state.repeat(actions.shape[0], 1)
-            total_costs = torch.zeros(actions.shape[0], device=device)
-
-            for t in range(self.horizon):
-                states[:, t + 1] = dynamics_fn(states[:, t], actions[:, t])
-                # total_costs += cost_fn(states[:, t], goal, actions[:, t])
-            # total_costs += cost_fn(states[:, -1], goal, actions[:, -1])
-            for n in range(actions.shape[0]):
-                total_costs[n] = cost_fn(states[n], goal)
 
             # Get elite samples
             elite_idxs = torch.topk(-total_costs, self.num_elites)[1]
             current_elite_actions = actions[elite_idxs]
-            current_elite_states = states[elite_idxs]
+            current_elite_costs = total_costs[elite_idxs]
 
             # Update mean and std
             new_mean = current_elite_actions.mean(dim=0)
             new_std = current_elite_actions.std(dim=0)
 
-            action_mean = (1 - self.alpha) * new_mean + self.alpha * action_mean
+            self.mean = (1 - self.alpha) * new_mean + self.alpha * self.mean
             action_std = (1 - self.alpha) * new_std + self.alpha * action_std
 
             # Update best first action if we found better solution
@@ -187,11 +201,9 @@ class SimpleICem:
 
         # Shift mean time-wise like original iCEM
         # print(action_mean)
-        # action_mean[:-1] = action_mean[1:]
         # Keep last timestep mean unchanged
 
         # Store elite actions/states for next environment step
-        self.prev_elite_actions = current_elite_actions
-        self.prev_elite_states = current_elite_states
+        self.actions_from_prev_elites = current_elite_actions
 
-        return actions[min_cost_idx, :]
+        return best_first_action

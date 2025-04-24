@@ -44,7 +44,7 @@ class SeqVae(nn.Module):
         )
         return torch.sum(kl_d, (-1, -2))
 
-    def _compute_kld_x(self, mu_q, var_q, x_samples, input):
+    def _compute_kld_x(self, mu_q, var_q, x_samples, input=None):
         """Computes KLD between the posterior and prior distribution.
 
         Args:
@@ -55,7 +55,8 @@ class SeqVae(nn.Module):
         Returns:
             torch.Tensor: KL divergence between posterior and prior distributions.
         """
-
+        if input is None:
+            input = torch.zeros_like(x_samples, device=self.device)
         _, mu_p_x, var_p_x = self.dynamics.sample_forward(
             x_samples[..., :-1, :], input[..., :-1, :]
         )
@@ -81,10 +82,22 @@ class SeqVae(nn.Module):
         return -elbo
 
     def train_model(
-        self, dataloader, lr, weight_decay, n_epochs, has_input=False, verbose=True
+        self,
+        dataloader,
+        lr,
+        weight_decay,
+        n_epochs,
+        has_input=False,
+        optimizer="SGD",
+        verbose=True,
     ):
         param_list = list(self.parameters())
-        opt = torch.optim.AdamW(params=param_list, lr=lr, weight_decay=weight_decay)
+        if optimizer == "SGD":
+            opt = torch.optim.SGD(params=param_list, lr=lr)
+        elif optimizer == "Adam":
+            opt = torch.optim.Adam(params=param_list, lr=lr, weight_decay=weight_decay)
+        elif optimizer == "AdamW":
+            opt = torch.optim.AdamW(params=param_list, lr=lr, weight_decay=weight_decay)
         training_losses = []
         for _ in tqdm(range(n_epochs), disable=not verbose):
             for batch in dataloader:
@@ -129,7 +142,7 @@ class EnsembleSeqVae(nn.Module):
         )
         return torch.sum(kl_d, (-1, -2))
 
-    def _compute_kld_x(self, mu_q, var_q, x_samples, input, idx):
+    def _compute_kld_x(self, mu_q, var_q, x_samples, idx, input=None):
         """Computes KLD between the posterior and prior distribution.
 
         Args:
@@ -142,6 +155,8 @@ class EnsembleSeqVae(nn.Module):
             torch.Tensor: KL divergence between posterior and prior distributions.
         """
 
+        if input is None:
+            input = torch.zeros_like(x_samples, device=self.device)
         _, mu_p_x, var_p_x = self.dynamics.models[idx].sample_forward(
             x_samples[..., :-1, :], input[..., :-1, :]
         )
@@ -162,13 +177,21 @@ class EnsembleSeqVae(nn.Module):
             torch.Tensor: Negative ELBO value.
         """
         x_samples, mu_q_x, var_q_x, log_q = self.encoder(y, n_samples=n_samples)
-        kl_d_x = self._compute_kld_x(mu_q_x, var_q_x, x_samples, input, idx)
+        kl_d_x = self._compute_kld_x(mu_q_x, var_q_x, x_samples, idx, input)
         log_like = self.decoder.compute_log_prob(x_samples, y)
         elbo = torch.mean(log_like - beta * kl_d_x)
         return -elbo
 
     def train_model(
-        self, dataloader, lr, weight_decay, n_epochs, has_input=False, verbose=True
+        self,
+        dataloader,
+        lr,
+        weight_decay,
+        n_epochs,
+        has_input=False,
+        verbose=True,
+        optimizer="SGD",
+        perturbation=0.0,
     ):
         for i in range(self.dynamics.n_models):
             param_list = (
@@ -176,8 +199,16 @@ class EnsembleSeqVae(nn.Module):
                 + list(self.encoder.parameters())
                 + list(self.decoder.parameters())
             )
-
-            opt = torch.optim.AdamW(params=param_list, lr=lr, weight_decay=weight_decay)
+            if optimizer == "SGD":
+                opt = torch.optim.SGD(params=param_list, lr=lr)
+            elif optimizer == "Adam":
+                opt = torch.optim.Adam(
+                    params=param_list, lr=lr, weight_decay=weight_decay
+                )
+            elif optimizer == "AdamW":
+                opt = torch.optim.AdamW(
+                    params=param_list, lr=lr, weight_decay=weight_decay
+                )
             training_losses = []
             for _ in tqdm(range(n_epochs), disable=not verbose):
                 for batch in dataloader:
@@ -194,6 +225,14 @@ class EnsembleSeqVae(nn.Module):
                     opt.step()
                     with torch.no_grad():
                         training_losses.append(loss.item())
+
+            # Perturb the dynamics model after training
+            # Only perturb parameter with gradient
+            if perturbation > 0:
+                for param in self.dynamics.models[i].parameters():
+                    if param.grad is not None:
+                        param.data += perturbation * torch.randn_like(param.data)
+            # return training_losses
 
 
 if __name__ == "__main__":

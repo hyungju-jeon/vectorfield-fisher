@@ -7,19 +7,18 @@ eps = 1e-6
 
 
 class Encoder(nn.Module):
-    """Encoder class for a variational autoencoder with a GRU-based architecture.
+    """Encoder class using a simple MLP applied per time step.
 
     Args:
         dy (int): Dimension of the input features.
         dx (int): Dimension of the latent space.
-        dh (int): Dimension of the hidden state in the GRU.
+        dh (int): Dimension of the hidden layer in the MLP.
         device (str, optional): Device to run the model on. Defaults to "cpu".
 
     Attributes:
-        dh (int): Dimension of the hidden state in the GRU.
+        dh (int): Dimension of the hidden layer in the MLP.
         dx (int): Dimension of the latent space.
-        gru (nn.GRU): Gated Recurrent Unit layer for encoding the input sequence.
-        readout (nn.Linear): Linear layer for producing the parameters of the latent distribution.
+        mlp (nn.Sequential): Multi-layer perceptron for encoding each time step.
         device (str): Device to run the model on.
     """
 
@@ -29,35 +28,38 @@ class Encoder(nn.Module):
         self.dh = dh
         self.dx = dx
 
-        # Define a bidirectional GRU layer
-        self.gru = nn.GRU(
-            input_size=dy, hidden_size=dh, bidirectional=True, batch_first=True
+        # Define an MLP to process each time step independently
+        self.mlp = nn.Sequential(
+            nn.Linear(dy, dh),
+            nn.ReLU(),
+            nn.Linear(dh, 2 * dx),  # Output mu and logvar for each time step
         ).to(device)
-
-        # Define a linear layer to produce the parameters of the latent distribution
-        self.readout = nn.Linear(2 * dh, 2 * dx).to(device)
 
         self.device = device
 
     def compute_param(self, x):
-        """Computes the mean and variance of the latent distribution.
+        """Computes the mean and variance of the latent distribution for each time step.
 
         Args:
             x (torch.Tensor): Input tensor of shape (Batch, Time, Dimension).
 
         Returns:
             tuple:
-                mu (torch.Tensor): Mean of the latent distribution.
-                var (torch.Tensor): Variance of the latent distribution.
+                mu (torch.Tensor): Mean of the latent distribution (Batch, Time, dx).
+                var (torch.Tensor): Variance of the latent distribution (Batch, Time, dx).
         """
-        h, _ = self.gru(x)
+        B, T, _ = x.shape
+        # Reshape input to process each time step independently: (B * T, dy)
+        x_flat = x.view(B * T, -1)
 
-        h = h.view(x.shape[0], x.shape[1], 2, self.dh)
-        h_cat = torch.cat(
-            (h[:, :, 0], h[:, :, 1]), -1
-        )  # TODO: can we achieve this with one view
-        out = self.readout(h_cat)
-        mu, logvar = torch.split(out, [self.dx, self.dx], -1)
+        # Apply MLP
+        out_flat = self.mlp(x_flat)  # Shape: (B * T, 2 * dx)
+
+        # Reshape output back to (B, T, 2 * dx)
+        out = out_flat.view(B, T, 2 * self.dx)
+
+        # Split into mu and logvar
+        mu, logvar = torch.split(out, [self.dx, self.dx], dim=-1)
         var = softplus(logvar) + eps
         return mu, var
 
@@ -75,10 +77,15 @@ class Encoder(nn.Module):
                 var (torch.Tensor): Variance of the latent distribution.
         """
         mu, var = self.compute_param(x)
+        # Ensure mu and var have the correct shape (B, T, dx) before sampling
+        # The shape should already be correct from compute_param
         samples = mu + torch.sqrt(var) * torch.randn(
             [n_samples] + list(mu.shape), device=self.device
         )
-        return samples.squeeze(0), mu, var
+        # If n_samples is 1, remove the sample dimension
+        if n_samples == 1:
+            samples = samples.squeeze(0)
+        return samples, mu, var
 
     def forward(self, x, n_samples=1):
         """Computes samples, mean, variance, and log probability of the latent distribution.

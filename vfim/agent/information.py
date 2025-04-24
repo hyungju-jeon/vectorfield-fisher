@@ -297,6 +297,49 @@ class FisherMetrics:
         else:
             return torch.diag((fim))
 
+    def compute_fim_point(self, z, use_diag=True):
+        # check if z is a tensor of shape (sample, 1, n_state)
+        if len(z.shape) == 2 and z.shape[0] == 1:
+            z = z.unsqueeze(0)
+        elif len(z.shape) == 2 and z.shape[0] != 1:
+            z = z.unsqueeze(1)
+
+        d_latent = z.shape[-1]
+        fim_list = []
+
+        for z_i in z:
+            z_i = z_i.squeeze(0)  # Remove the first dimension
+            df_dtheta = self.compute_jacobian_params(self.dynamics, z_i).detach()
+            H = self.compute_jacobian_state(self.decoder, z_i).detach()
+            sigma = H @ self.Q @ H.T + self.R
+            J = H @ df_dtheta
+            # J = H
+
+            # Update FIM
+            if not use_diag:
+                I = J.T @ torch.inverse(sigma) @ J
+                # idx = torch.where(torch.diag(I) > eps)[0]
+                # I = I[idx, :]
+                # I = I[:, idx]
+                # fim = torch.diag(torch.inverse(I + 1e-6 * torch.eye(I.shape[0])))
+                fim = torch.diag(torch.inverse(I))
+            else:
+                # Only compute diagonal element using einsum
+                sigma_inv = torch.inverse(sigma)
+                fim = torch.einsum("ij,ji->i", J.T, sigma_inv @ J)
+                # idx = torch.where(torch.diag(I) > eps)[0]
+                # I = I[idx, :]
+                # I = I[:, idx]
+
+            # remove inf and nan values
+            fim[torch.isinf(fim)] = 0
+            fim[torch.isnan(fim)] = 0
+
+            fim = fim.sum()
+            fim_list.append(fim.cpu())
+
+        return torch.stack(fim_list)
+
     def compute_fim_trajectory(self, z, use_diag=True):
         """Compute Fisher Information Matrix for a trajectory.
 

@@ -24,10 +24,10 @@ class DynamicsWrapper:
         return self.model(*args, **kwds)
 
     @torch.no_grad()
-    def generate_trajectory(self, x0, n_steps, R):
-        return self.model.sample_forward(x0, k=n_steps, var=R, return_trajectory=True)[
-            0
-        ]
+    def generate_trajectory(self, x0, n_steps, R, input=None):
+        return self.model.sample_forward(
+            x0, k=n_steps, var=R, input=input, return_trajectory=True
+        )[0]
 
     @torch.no_grad()
     def streamplot(self, **kwargs):
@@ -68,6 +68,51 @@ class LinearDynamics(nn.Module):
         return self.compute_param(x)
 
 
+class RBFDynamics(nn.Module):
+    def __init__(self, centers, device="cpu"):
+        super().__init__()
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.centers = centers.to(device)
+        # sigmas and weights are trainable parameters randomly initialized
+        # to the same size as centers
+        self.sigmas = 0.25
+        self.weights = nn.Parameter(
+            torch.randn(self.centers.shape),
+            requires_grad=True,
+        )
+        self.device = device
+
+    def compute_param(self, x):
+        return torch.matmul(self._rbf(x), self.weights)
+
+    def _rbf(self, x):
+        if len(x.shape) == 1:
+            x = x.unsqueeze(0)
+        return torch.exp(-torch.cdist(x, self.centers, p=2) ** 2) * (self.sigmas**2)
+
+    def sample_forward(self, x, input=None, k=1, var=None, return_trajectory=False):
+        x_samples = [x]
+        mus = []
+        if var is None:
+            var = torch.ones_like(x) * 0.001
+        for i in range(k):
+            if input is not None:
+                mus.append(self(x_samples[i]) + x_samples[i] + input[i])
+            else:
+                mus.append(self(x_samples[i]) + x_samples[i])
+            x_samples.append(
+                mus[i] + torch.sqrt(var) * torch.randn_like(mus[i], device=x.device)
+            )
+
+        if return_trajectory:
+            return torch.cat(x_samples, dim=-2)[..., 1:, :], torch.cat(mus, dim=-2), var
+        else:
+            return x_samples[-1], mus[-1], var
+
+    def forward(self, x):
+        return self.compute_param(x).view_as(x)
+
+
 class RNNDynamics(nn.Module):
     """RNN-based dynamics model that predicts state transitions.
 
@@ -100,7 +145,7 @@ class RNNDynamics(nn.Module):
             nn.ReLU(),
             nn.Linear(dh, d_out),
         ).to(device)
-        # Resnet
+        # initialize weights to zero
         self.device = device
 
     @torch.no_grad()
@@ -255,3 +300,83 @@ class EnsembleRNN(nn.Module):
         for model in self.models:
             predictions.append(model(x))
         return torch.stack(predictions)
+
+
+class EnsembleRBF(nn.Module):
+    """Ensemble of RBF-based dynamics models.
+
+    Args:
+        centers (torch.Tensor): Centers for the RBF kernels.
+        n_models (int): Number of ensemble members.
+        device (str, optional): Device to run model on. Defaults to "cpu".
+    """
+
+    def __init__(self, centers, n_models=5, device="cpu"):
+        super().__init__()
+        self.models = nn.ModuleList(
+            [RBFDynamics(centers, device=device) for _ in range(n_models)]
+        )
+        self.n_models = n_models
+        self.device = device
+
+    def sample_forward(self, x, input=None, k=1, var=None, return_trajectory=False):
+        """Generates samples using ensemble predictions.
+
+        Each model in ensemble generates predictions independently.
+        Final prediction is averaged across ensemble members.
+        Variance includes both model uncertainty and prediction uncertainty.
+        """
+        all_samples = []
+        all_means = []
+        all_vars = []
+
+        for model in self.models:
+            # Note: RBFDynamics sample_forward returns (samples, means, var)
+            # where var is typically fixed or passed in.
+            # We need to handle the variance aggregation appropriately.
+            samples, means, model_var = model.sample_forward(
+                x, input, k, var, return_trajectory
+            )
+            all_samples.append(samples)
+            all_means.append(means)
+            # Assuming var passed in or the default is used consistently
+            # If RBFDynamics calculated variance per step, this would need adjustment
+            all_vars.append(model_var)
+
+        # Stack predictions from ensemble members
+        samples = torch.stack(
+            all_samples
+        )  # (M, ..., T, D) or (M, ..., D) if not trajectory
+        means = torch.stack(
+            all_means
+        )  # (M, ..., T, D) or (M, ..., D) if not trajectory
+        # Assuming var is constant across steps and models if not provided per-step
+        # If var is returned per step, stack it: vars = torch.stack(all_vars) # (M, ..., T, D) or (M, ..., D)
+        # For now, assume it's a single tensor per model (e.g., fixed variance)
+        vars_tensor = torch.stack(
+            all_vars
+        )  # (M, ..., D) or similar shape depending on RBF var handling
+
+        # Combine predictions
+        mean_prediction = means.mean(dim=0)
+        # Total variance includes both model uncertainty (variance of means)
+        # and inherent prediction uncertainty (mean of variances)
+        total_variance = vars_tensor.mean(dim=0) + means.var(dim=0)
+
+        # Return format depends on return_trajectory
+        if return_trajectory:
+            # Return all individual model trajectories, the ensemble mean trajectory, and total variance
+            return samples, mean_prediction, total_variance
+        else:
+            # Return final step samples from all models, the ensemble mean final step, and total variance
+            # Note: samples shape might be (M, ..., D) here
+            return samples, mean_prediction, total_variance
+
+    def forward(self, x):
+        """Forward pass averages predictions from all ensemble members."""
+        predictions = []
+        for model in self.models:
+            predictions.append(model(x))  # Get vector field prediction mu = f(x)
+        # Stack predictions along a new dimension (ensemble dimension)
+        stacked_predictions = torch.stack(predictions)  # Shape (M, ..., D)
+        return stacked_predictions

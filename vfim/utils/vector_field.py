@@ -128,10 +128,13 @@ class VectorField:
         """
         return self.interpolate(x)
 
-    def sample_forward(self, x, k, var, return_trajectory=True):
+    def sample_forward(self, x, k, var, input=None, return_trajectory=True):
         x_samples, mus = [x], [x]
         for i in range(k):
-            mus.append(self(mus[i]) + mus[i])
+            if input is not None:
+                mus.append(self(mus[i]) + mus[i] + input[:, i])
+            else:
+                mus.append(self(mus[i]) + mus[i])
             x_samples.append(
                 mus[i] + torch.sqrt(var) * torch.randn_like(mus[i], device=x.device)
             )
@@ -143,7 +146,7 @@ class VectorField:
 
 def limit_cycle(
     xy: ArrayType,
-    w: float = 1,
+    w: float = 2,
     d: float = 1.0,
     random_seed: int = 49,
     **kwargs,
@@ -151,8 +154,8 @@ def limit_cycle(
     torch.manual_seed(random_seed)
     grid_size = int(torch.sqrt(torch.tensor(xy.shape[0])))
     r = torch.sqrt(xy[:, 0] ** 2 + xy[:, 1] ** 2)
-    U = xy[:, 0] * (d - r**2) - w * xy[:, 1]
-    V = xy[:, 1] * (d - r**2) + w * xy[:, 0]
+    U = xy[:, 0] * (d - r**2) - w * xy[:, 1] * (d * 2 - r**2)
+    V = xy[:, 1] * (d - r**2) + w * xy[:, 0] * (d * 2 - r**2)
 
     speed = torch.sqrt(U**2 + V**2)
     speed = speed.max()

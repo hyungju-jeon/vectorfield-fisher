@@ -6,6 +6,12 @@ from torch.nn.functional import softplus
 eps = 1e-6
 
 
+# Define a custom module for element-wise exponential
+class Exp(nn.Module):
+    def forward(self, x):
+        return torch.exp(x)
+
+
 class NormalDecoder(nn.Module):
     """Neural network module that decodes input features into normal distribution.
 
@@ -20,7 +26,7 @@ class NormalDecoder(nn.Module):
         logvar (nn.Parameter): Learnable parameter for log variance.
     """
 
-    def __init__(self, dx, dy, device="cpu", l2=0.0, C=None):
+    def __init__(self, dx, dy, device="cpu", l2=0.0, C=None, b=None):
         """
         Initializes the NormalDecoder with input and output dimensions and the device to run on.
         Args:
@@ -31,18 +37,21 @@ class NormalDecoder(nn.Module):
         super().__init__()
         self.device = device
         if C is not None:
-            # z ~ exp(Cy)
-
-            self.linear = nn.Linear(dx, dy, bias=False).to(device).requires_grad_(False)
+            self.linear = nn.Linear(dx, dy, bias=True).to(device).requires_grad_(False)
             self.linear.weight.data = C
-            self.decoder = nn.Sequential(self.linear, nn.ReLU()).to(device)
+            self.linear.bias.data = b
+            # decoder ~ exp(Linear(x))
+            self.decoder = nn.Sequential(
+                self.linear,
+                Exp(),  # Use Exp() instead of nn.Softplus()
+            ).to(device)
 
         else:
             # Remove bias from linear layer
-            self.decoder = nn.Linear(dx, dy, bias=False).to(device)
+            self.decoder = nn.Linear(dx, dy, bias=True).to(device)
             self.normalize_weights()  # Initialize with normalized weights
         self.logvar = nn.Parameter(
-            0.01 * torch.randn(1, dy, device=device), requires_grad=True
+            0.001 * torch.randn(1, dy, device=device), requires_grad=True
         )
         self.l2 = l2
 
@@ -66,7 +75,7 @@ class NormalDecoder(nn.Module):
                 mu (torch.Tensor): Mean of normal distribution.
                 var (torch.Tensor): Variance of normal distribution.
         """
-        mu = self.decoder(x)  # This is now just matrix multiplication
+        mu = self.decoder(x)  # This will apply Linear -> Exp if C is provided
         var = softplus(self.logvar) + eps
         return mu, var
 

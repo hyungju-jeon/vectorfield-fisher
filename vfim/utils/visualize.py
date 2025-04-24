@@ -21,17 +21,15 @@ def compute_vector_field(dynamics, x_range=2.5, n_grid=50, device="cpu"):
     else:
         xy = xy.to(device)
 
-    vel = torch.zeros(xy.shape, device=device)
-    with torch.no_grad():
-        for n in range(xy.shape[0]):
-            vel[n, :] = (dynamics(xy[[n]])).to("cpu")
+    # Process all points in a batch if dynamics supports it
+    vel = dynamics(xy).to("cpu")
 
     U = vel[:, 0].reshape(X.shape[0], X.shape[1])
     V = vel[:, 1].reshape(Y.shape[0], Y.shape[1])
     return X, Y, U, V
 
 
-def plot_vector_field(dynamics, ax=None, **kwargs):
+def plot_vector_field(dynamics, ax=None, cmax=None, show_cbar=False, **kwargs):
     if hasattr(dynamics, "X"):
         X, Y, U, V = dynamics.X, dynamics.Y, dynamics.U, dynamics.V
     else:
@@ -39,10 +37,11 @@ def plot_vector_field(dynamics, ax=None, **kwargs):
     X, Y, U, V = X.cpu().numpy(), Y.cpu().numpy(), U.cpu().numpy(), V.cpu().numpy()
     speed = np.sqrt(U**2 + V**2)
 
-    plt.figure(figsize=(10, 8))
     if ax is not None:
         plt.sca(ax)
-    plt.streamplot(
+    else:
+        plt.figure(figsize=(10, 8))
+    stream = plt.streamplot(
         X,
         Y,
         U,
@@ -52,8 +51,10 @@ def plot_vector_field(dynamics, ax=None, **kwargs):
         density=2,
         cmap="viridis",
     )
-    if ax is None:
-        plt.colorbar(label="Speed", aspect=20)
+    if cmax is not None:
+        stream.lines.set_clim(0, cmax)
+    if show_cbar:
+        plt.colorbar(stream.lines, label="Speed", aspect=20)
     plt.xlabel("Latent Dimension 1")
     plt.ylabel("Latent Dimension 2")
     plt.title("Vector Field of Latent Dynamics")
