@@ -17,26 +17,51 @@ import os
 import imageio
 
 
-result_dir = "/home/hyungju/Desktop/vectorfield-fisher/results/limitcycle/"
+result_dir = "/home/hyungju/Desktop/vectorfield-fisher/results/fisher/"
 os.makedirs(result_dir, exist_ok=True)
 
 # %% Define Auxiliary Functions
 torch_seed = 1111
+X_BOUND = 2.5
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 torch.set_default_device(device)
-grid_x = torch.linspace(-2.5, 2.5, 25)
-grid_y = torch.linspace(-2.5, 2.5, 25)
+grid_x = torch.linspace(-X_BOUND, X_BOUND, 25)
+grid_y = torch.linspace(-X_BOUND, X_BOUND, 25)
 xx, yy = torch.meshgrid(grid_x, grid_y, indexing="ij")  # [H, W]
 grid_pts = torch.stack([xx.flatten(), yy.flatten()], dim=1)
 
-rbf_grid_x = torch.linspace(-2.5, 2.5, 10)
-rbf_grid_y = torch.linspace(-2.5, 2.5, 10)
+rbf_grid_x = torch.linspace(-X_BOUND, X_BOUND, 10)
+rbf_grid_y = torch.linspace(-X_BOUND, X_BOUND, 10)
 rbf_xx, rbf_yy = torch.meshgrid(rbf_grid_x, rbf_grid_y, indexing="ij")  # [H, W]
 rbf_grid_pts = torch.stack([rbf_xx.flatten(), rbf_yy.flatten()], dim=1)
 
 Q = torch.tensor(1e-3, device=device)  # process noise
 R = torch.tensor(1e-3, device=device)  # measurement noise
+
+
+def log_linear_obs(x, C, b, **kwargs):
+    """Log-linear observation model."""
+    return torch.exp(x @ C.T + b) + torch.randn(
+        x.shape[0], x.shape[1], C.shape[0]
+    ) * torch.sqrt(R)
+
+
+def gaussian_obs(x, A, mu, sigma, **kwargs):
+    """Gaussian observation model."""
+    # C * (-(x-mu)^2/(2*sigma^2))
+    # x : [B, T, d_latent]
+    # A : [d_obs]
+    # mu : [d_obs, d_latent]
+    # sigma : [d_latent]
+    XX = torch.einsum(
+        "btlo, btlo -> btl",
+        (x.unsqueeze(-2) - mu) * torch.reciprocal(sigma),
+        (x.unsqueeze(-2) - mu),
+    )
+    return A * torch.exp(-XX) + torch.randn(
+        x.shape[0], x.shape[1], A.shape[0]
+    ) * torch.sqrt(R)
 
 
 @torch.no_grad()
@@ -47,60 +72,74 @@ def dynamics_fn(state, action):
         + action
         + torch.randn_like(state) * torch.sqrt(Q)
     )
-    return new_state.clamp_(-2.5, 2.5)
+    return new_state.clamp_(-X_BOUND, X_BOUND)
 
 
 @torch.no_grad()
 def dynamics_true_fn(state, action):
     new_state = state + f_true(state) + action + torch.randn_like(state) * torch.sqrt(Q)
-    return new_state.clamp_(-2.5, 2.5)
+    return new_state.clamp_(-X_BOUND, X_BOUND)
 
 
-def initialize_vectorfield(d_obs, d_latent, mean_rate=20, device="cpu"):
+def initialize_vectorfield(
+    d_obs, d_latent, mean_rate=5, model="log-linear", device="cpu"
+):
     #  Step 0: Set up random seed and key
     torch.manual_seed(torch_seed)
 
     #  Step 1: Define true dynamics and observation model
-    vf = utils.VectorField(model="multi", x_range=2.5, n_grid=50)
+    vf = utils.VectorField(model="limitcycle", x_range=X_BOUND, n_grid=50)
     vf.generate_vector_field(random_seed=torch_seed, w_attractor=0.05)
-
-    # Observation model parameters: y = exp(C z + b) + noise.
-    C = torch.randn(d_obs, d_latent) * 1
-    C = C / torch.norm(C, dim=1, keepdim=True)  # Normalize rows of C
-    # b = log(mean_rate)-Cx
-
-    print(mean_rate)
-    b = 1.0 * torch.randn(d_obs) - torch.log(torch.tensor(mean_rate))
-    # b += torch.log(
-    #     torch.tensor(mean_rate) / torch.exp(grid_pts @ C.T + b).mean(0)
-    # )  # Shift b to have mean rate
-
     f_true = env.DynamicsWrapper(model=vf)
 
-    return f_true, C, b
+    if model == "log-linear":
+        # Log-linear Observation model : y = exp(C z + b) + noise.
+        C = torch.randn(d_obs, d_latent)
+        C = C / torch.norm(C, dim=1, keepdim=True)  # Normalize rows of C
+        C *= 0.5
+        b = 1.0 * torch.randn(d_obs) - torch.log(torch.tensor(mean_rate))
+        b += torch.log(torch.tensor(mean_rate) / torch.exp(grid_pts @ C.T + b).mean(0))
+
+        model_params = {
+            "model": log_linear_obs,
+            "C": C,
+            "b": b,
+        }
+
+        return f_true, model_params
+
+    elif model == "gaussian":
+        # Gaussian Observation model : y = C exp(-(x-u)^2/(2*sigma^2)) + noise
+        A = torch.rand(d_obs) * 20
+        mu = torch.rand(d_obs, d_latent) * (2 * X_BOUND) - X_BOUND
+        sigma = torch.rand(d_obs, d_latent) * 0.5 + 2
+        model_params = {"model": gaussian_obs, "A": A, "mu": mu, "sigma": sigma}
+
+        return f_true, model_params
 
 
-def approximate_vectorfield(f_true, C, b, device="cpu"):
+def approximate_vectorfield(f_true, model_params, device="cpu"):
     K = 5000
     T = 100
 
-    d_obs = C.shape[0]
-    d_latent = C.shape[1]
+    obs_model = model_params["model"]
 
     x0 = torch.rand(K, 2) * 5 - 2.5
     x0 = x0.unsqueeze(1)
     x_star = f_true.generate_trajectory(x0, T, Q)
-    y_star = torch.exp(x_star @ C.T + b) + torch.randn(K, T, d_obs) * torch.sqrt(R)
+    y_star = obs_model(x_star, **model_params)
 
+    d_obs = y_star.shape[-1]
+    d_latent = x_star.shape[-1]
     #  Step 3: Initialize VAE for 'true' f approximation
     d_hidden = 16
 
-    encoder = env.Encoder(d_obs, d_latent, d_hidden, device=device)
+    encoder = env.MlpEncoder(d_obs, d_latent, d_hidden, device=device)
     # dynamics = env.RNNDynamics(d_latent, dh=8, device=device)
     dynamics = env.RBFDynamics(rbf_grid_pts, device=device)
     # Initialize decoder with pre-defined C matrix (known readout)
     decoder = env.LogLinearNormalDecoder(
-        d_latent, d_obs, device=device, l2=1.0, C=C, b=b
+        dx=d_latent, dy=d_obs, C=model_params["C"], b=model_params["b"], device=device
     )
     vae_star = env.SeqVae(dynamics, encoder, decoder, device=device)
 
@@ -355,7 +394,7 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     d_obs = 50
     d_latent = 2
-    run_initialize = False
+    run_initialize = True
 
     true_dynamics_file = os.path.join(result_dir, "model_true.pt")
     if os.path.exists(true_dynamics_file) and not run_initialize:
@@ -367,13 +406,16 @@ if __name__ == "__main__":
 
         print("Loaded VAE from file.")
     else:
-        f_true, C, b = initialize_vectorfield(d_obs, d_latent, device=device)
-        vae_star, f_star, x_star, y_star = approximate_vectorfield(f_true, C, b, device)
+        f_true, model_params = initialize_vectorfield(
+            50, 2, model="log-linear", device=device
+        )
+        vae_star, f_star, x_star, y_star = approximate_vectorfield(
+            f_true, model_params, device
+        )
         torch.save(
             {
                 "f_true": f_true,
-                "C": C,
-                "b": b,
+                "model_params": model_params,
                 "vae_star": vae_star,
             },
             true_dynamics_file,

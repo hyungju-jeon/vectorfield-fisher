@@ -5,7 +5,7 @@ import copy
 from torch.utils.data import DataLoader
 from vfim.model.dynamics import DynamicsWrapper, RNNDynamics, LinearDynamics
 from data.vector_field import VectorField
-from vfim.model.encoder import Encoder
+from vfim.model.encoder import MlpEncoder
 from vfim.model.decoder.decoder import NormalDecoder
 from vfim.model import SeqVae, EnsembleSeqVae
 from vfim.information import FisherMetrics
@@ -62,7 +62,7 @@ def test_linear_dynamics():
     x_train = f_true.generate_trajectory(x0, T, R)
     y_train = (x_train @ C.T) + torch.randn(K, T, n_neurons) * torch.sqrt(Q)
 
-    encoder = Encoder(d_obs, d_latent, d_hidden, device=device)
+    encoder = MlpEncoder(d_obs, d_latent, d_hidden, device=device)
     vae = SeqVae(linear_dynamics, encoder, decoder, device=device)
 
     dataloader = DataLoader(y_train, batch_size=batch_size)
@@ -102,7 +102,7 @@ def test_linear_dynamics():
     linear_mc = LinearDynamics(
         A=torch.rand_like(A), B=torch.rand_like(B), R=R, device=device
     )
-    encoder_mc = Encoder(d_obs, d_latent, d_hidden, device=device)
+    encoder_mc = MlpEncoder(d_obs, d_latent, d_hidden, device=device)
     encoder_mc.load_state_dict(encoder.state_dict())
     encoder_mc.requires_grad_(False)
     vae_mc = SeqVae(linear_mc, encoder_mc, decoder, device=device)
@@ -182,7 +182,7 @@ def test_RNN_dynamics():
     d_latent = 2
     d_hidden = 16
 
-    encoder = Encoder(d_obs, d_latent, d_hidden, device=device)
+    encoder = MlpEncoder(d_obs, d_latent, d_hidden, device=device)
     rnn_dynamics = RNNDynamics(d_latent, device=device)
     # Initialize decoder with pre-defined C matrix (known readout)
     decoder = NormalDecoder(d_latent, d_obs, device=device, l2=1.0, C=C)
@@ -205,7 +205,7 @@ def test_RNN_dynamics():
     x_train = f_true.generate_trajectory(x0, T, R)
     y_train = (x_train @ C.T) + torch.randn(K, T, n_neurons) * torch.sqrt(Q)
 
-    encoder_hat = Encoder(d_obs, d_latent, d_hidden, device=device)
+    encoder_hat = MlpEncoder(d_obs, d_latent, d_hidden, device=device)
     rnn_dynamics_hat = RNNDynamics(d_latent, device=device)
     vae = SeqVae(rnn_dynamics_hat, encoder_hat, decoder, device=device)
 
@@ -236,7 +236,7 @@ def test_RNN_dynamics():
 
     # Create a single reusable network instance
     rnn_mc = RNNDynamics(d_latent, device=device)
-    encoder_mc = Encoder(d_obs, d_latent, d_hidden, device=device)
+    encoder_mc = MlpEncoder(d_obs, d_latent, d_hidden, device=device)
     encoder_mc.load_state_dict(encoder_hat.state_dict())
     encoder_mc.requires_grad_(False)
     vae_mc = SeqVae(rnn_mc, encoder_mc, decoder, device=device)
@@ -314,7 +314,7 @@ if __name__ == "__main__":
     d_latent = 2
     d_hidden = 16
 
-    encoder = Encoder(d_obs, d_latent, d_hidden, device=device)
+    encoder = MlpEncoder(d_obs, d_latent, d_hidden, device=device)
     rnn_dynamics = RNNDynamics(d_latent, device=device)
     # Initialize decoder with pre-defined C matrix (known readout)
     decoder = NormalDecoder(d_latent, d_obs, device=device, l2=1.0, C=C)
@@ -337,7 +337,7 @@ if __name__ == "__main__":
     y_train = y_star[:K]
 
     # encoder_hat = Encoder(d_obs, d_latent, d_hidden, device=device)
-    encoder_hat = Encoder(d_obs, d_latent, d_hidden, device=device)
+    encoder_hat = MlpEncoder(d_obs, d_latent, d_hidden, device=device)
     encoder_hat.load_state_dict(encoder.state_dict())
     encoder_hat.requires_grad_(False)
     rnn_dynamics_hat = RNNDynamics(d_latent, device=device)
@@ -371,7 +371,7 @@ if __name__ == "__main__":
 
     # Create a single reusable network instance
     rnn_mc = RNNDynamics(d_latent, device=device)
-    encoder_mc = Encoder(d_obs, d_latent, d_hidden, device=device)
+    encoder_mc = MlpEncoder(d_obs, d_latent, d_hidden, device=device)
     encoder_mc.load_state_dict(encoder.state_dict())
     encoder_mc.requires_grad_(False)
     vae_mc = SeqVae(rnn_mc, encoder_mc, decoder, device=device)

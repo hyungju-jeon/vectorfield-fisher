@@ -70,10 +70,10 @@ def approximate_vectorfield(f_true, C, device="cpu"):
     #  Step 3: Initialize VAE for 'true' f approximation
     d_hidden = 16
 
-    encoder = env.Encoder(d_obs, d_latent, d_hidden, device=device)
+    encoder = env.MlpEncoder(d_obs, d_latent, d_hidden, device=device)
     rnn_dynamics = env.RNNDynamics(d_latent, dh=16, device=device)
     # Initialize decoder with pre-defined C matrix (known readout)
-    decoder = env.NormalDecoder(d_latent, d_obs, device=device, l2=1.0, C=C)
+    decoder = env.LogLinearNormalDecoder(d_latent, d_obs, device=device, l2=1.0, C=C)
     vae_star = env.SeqVae(rnn_dynamics, encoder, decoder, device=device)
 
     batch_size = 64
