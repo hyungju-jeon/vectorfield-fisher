@@ -5,6 +5,8 @@ import numpy as np
 
 eps = 1e-6
 
+from torch import linalg as LA
+
 
 class FisherMetrics:
     """Compute Fisher Information Matrix and related metrics for dynamics models.
@@ -297,8 +299,37 @@ class FisherMetrics:
         else:
             return torch.diag((fim))
 
+    @torch.no_grad()
+    def compute_crlb_point_rbf(self, z, u=None):
+        # check if z is a tensor of shape (batch, 1, d_latent)
+        if len(z.shape) == 2 and z.shape[0] == 1:
+            z = z.unsqueeze(0)
+        elif len(z.shape) == 2 and z.shape[0] != 1:
+            z = z.unsqueeze(1)
+
+        d_latent = z.shape[-1]
+        C = self.decoder.decoder[0].weight
+
+        if u is None:
+            u = torch.zeros_like(z)
+        z_1 = z + self.dynamics(z) + u
+        dh_dz = self.decoder(z_1).unsqueeze(-1) * C  # A = dh/dz
+        phi = self.dynamics.rbf(z)  # B = I X phi
+
+        # FIM = A^T A \otimes phi phi^T
+        ATA = dh_dz.transpose(-2, -1) @ dh_dz
+        l_w, w = torch.linalg.eigh(ATA)
+        l_v = torch.einsum("...l,...l->", phi, phi)
+        v = phi / l_v
+        eigvals = torch.einsum("...l,...->...l", l_w, l_v)
+        eigvals = eigvals @ torch.linalg.inv(self.Q)
+
+        CRLB = torch.reciprocal(eigvals).sum(-1)
+
+        return CRLB
+
     def compute_fim_point(self, z, use_diag=True):
-        # check if z is a tensor of shape (sample, 1, n_state)
+        # check if z is a tensor of shape (sample, 1, d_latent)
         if len(z.shape) == 2 and z.shape[0] == 1:
             z = z.unsqueeze(0)
         elif len(z.shape) == 2 and z.shape[0] != 1:
